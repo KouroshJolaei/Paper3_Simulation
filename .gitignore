@@ -1,0 +1,17 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Backups and temporary files
+*_backup.py
+*.odt#
+*.png
+Figure_*.png
+
+# External dependencies
+curobo-stable/
+TSF-85/
+
+# Data folder: Ignore everything, but keep JSON configs
+Data/
+!Data/*.json
