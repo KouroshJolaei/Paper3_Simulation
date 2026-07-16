@@ -40,7 +40,7 @@ print(f"[grid] close={CLOSE_RAD}  output={OUTPUT_DIR}  basename={BASENAME}")
 # Launch Isaac Sim (headless)
 # ============================================================
 from isaacsim import SimulationApp
-simulation_app = SimulationApp({"headless": True, "physics_gpu": 0})
+simulation_app = SimulationApp({"headless": False, "physics_gpu": 0})
 
 import numpy as np, carb
 
@@ -86,7 +86,7 @@ TOOL_DOWN_ROTVEC      = np.array([2.2214, 2.2214, 0.0])
 
 GRIPPER_RAMP_FRAMES = 60
 WAIT_GRASP_SECONDS  = 1.0
-WAIT_HOLD_SECONDS   = 1.0
+WAIT_HOLD_SECONDS   = 20.0
 N_STEPS             = 10
 CASE13_WEIGHT       = [1.0, 1.0, 1.0, 1.0, 1.0, 0.0]
 
@@ -199,12 +199,9 @@ world.reset()
 
 # ============================================================
 # STABILIZE the object with a FIXED JOINT (bolt it to the world).
-# The object stays a DYNAMIC body (deformable sensor still reads contact),
-# but a fixed joint anchors it so it can't tip or fall.
-# Optional explicit pose via OBJ_POS_X/Y/Z and OBJ_ORIENT
-#   (standing | horizontal_x | horizontal_y | horizontal_y_tilt | tilt_x | keep).
-# OBJ_TILT_DEG sets the tilt angle for the *_tilt / tilt_x options.
-# Controlled by GRASP_FREEZE_OBJECT (default on). Set to "0" to disable.
+# Unlike kinematic freeze, the cylinder stays a normal DYNAMIC body so the
+# deformable sensor still registers contact — but a fixed joint anchors it so
+# it can't tip or fall. Controlled by GRASP_FREEZE_OBJECT (default on).
 # ============================================================
 if os.environ.get("GRASP_FREEZE_OBJECT", "1") != "0":
     _frz = "/World/robot_gripper_adapter_sensor/Object_02"
@@ -212,10 +209,15 @@ if os.environ.get("GRASP_FREEZE_OBJECT", "1") != "0":
         from pxr import Gf
         _obj = stage.GetPrimAtPath(_frz)
         if _obj.IsValid():
+            # ensure dynamic (NOT kinematic) so the deformable sensor reads contact
             _rb = UsdPhysics.RigidBodyAPI(_obj) if _obj.HasAPI(UsdPhysics.RigidBodyAPI) else UsdPhysics.RigidBodyAPI.Apply(_obj)
             _k = _rb.GetKinematicEnabledAttr()
-            if _k: _k.Set(False)   # ensure dynamic so sensor reads contact
+            if _k: _k.Set(False)
 
+            # --- optional explicit pose for the object (anchor target) ---
+            # Set via env vars; default = current scene pose (standing on table).
+            # OBJ_POS_X/Y/Z  = world position of the cylinder CENTER
+            # OBJ_ORIENT     = "standing" | "horizontal_x" | "horizontal_y" | "keep"
             _xc = UsdGeom.XformCache()
             _m = _xc.GetLocalToWorldTransform(_obj)
             _cur_pos = _m.ExtractTranslation()
@@ -232,19 +234,21 @@ if os.environ.get("GRASP_FREEZE_OBJECT", "1") != "0":
                                 float(cx*sy*cz+sx*cy*sz), float(cx*cy*sz-sx*sy*cz))
             if _orient == "standing":
                 _q = Gf.Quatf(1.0, 0.0, 0.0, 0.0)
-            elif _orient == "horizontal_x":
+            elif _orient == "horizontal_x":   # long axis along world X
                 _q = _euler_q(0, np.pi/2, 0)
-            elif _orient == "horizontal_y":
+            elif _orient == "horizontal_y":   # long axis along world Y
                 _q = _euler_q(np.pi/2, 0, 0)
             elif _orient == "horizontal_y_tilt":
+                # lay along Y (rot pi/2 about X), THEN tilt by OBJ_TILT_DEG about X
                 _tilt = np.deg2rad(float(os.environ.get("OBJ_TILT_DEG", "20")))
                 _q = _euler_q(np.pi/2 + _tilt, 0, 0)
-            elif _orient == "tilt_x":
+            elif _orient == "tilt_x":          # standing, tilted by OBJ_TILT_DEG about X
                 _tilt = np.deg2rad(float(os.environ.get("OBJ_TILT_DEG", "20")))
                 _q = _euler_q(_tilt, 0, 0)
-            else:
+            else:                              # keep current orientation
                 _q = Gf.Quatf(_cur_rot.GetReal(), *[float(x) for x in _cur_rot.GetImaginary()])
 
+            # write the pose onto the object's existing xform ops (double precision)
             try:
                 _ex = {op.GetOpName(): op for op in UsdGeom.Xformable(_obj).GetOrderedXformOps()}
                 if "xformOp:translate" in _ex:
@@ -256,6 +260,7 @@ if os.environ.get("GRASP_FREEZE_OBJECT", "1") != "0":
                 print(f"[grid] note: could not set object pose ({_pe}); anchoring at current pose")
                 _px, _py, _pz = _cur_pos[0], _cur_pos[1], _cur_pos[2]
 
+            # --- fixed joint anchored at the TARGET pose (not a drifted value) ---
             _jpath = _frz + "/WorldFixedJoint"
             _joint = UsdPhysics.FixedJoint.Define(stage, _jpath)
             _joint.CreateBody1Rel().SetTargets([_frz])
@@ -263,7 +268,7 @@ if os.environ.get("GRASP_FREEZE_OBJECT", "1") != "0":
             _joint.CreateLocalRot0Attr().Set(_q)
             _joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
             _joint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
-            print(f"[grid] cylinder BOLTED (dynamic) at pose ({_px:.4f},{_py:.4f},{_pz:.4f}) orient={_orient}")
+            print(f"[grid] cylinder BOLTED (dynamic) at pose ({_px:.4f},{_py:.4f},{_pz:.4f}) orient={_orient}: {_jpath}")
         else:
             print(f"[grid] WARNING: {_frz} not found, cannot bolt.")
     except Exception as e:

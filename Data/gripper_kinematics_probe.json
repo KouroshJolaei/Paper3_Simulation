@@ -1,0 +1,435 @@
+{
+  "usd_path": "/home/kourosh/Paper3_Simulation/TSF-85/assets/Robotiq_2F_85_modified.usd",
+  "n_joints": 8,
+  "n_links": 13,
+  "joints": [
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/left_outer_finger/FixedJoint",
+      "type": "PhysicsFixedJoint",
+      "body0": [
+        "/Robotiq_2F_85/Robotiq_2F_85/left_outer_knuckle"
+      ],
+      "body1": [
+        "/Robotiq_2F_85/Robotiq_2F_85/left_outer_finger"
+      ],
+      "localPos0": [
+        7.4505797087454084e-09,
+        7.450580152834618e-09,
+        3.874450094087933e-09
+      ],
+      "localPos1": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "localRot0": "(1, -5.531774e-8, -4.2146855e-8, 2.370759e-8)",
+      "localRot1": "(1, 0, 0, 0)",
+      "axis": null,
+      "lowerLimit": null,
+      "upperLimit": null
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/right_outer_finger/FixedJoint",
+      "type": "PhysicsFixedJoint",
+      "body0": [
+        "/Robotiq_2F_85/Robotiq_2F_85/right_outer_knuckle"
+      ],
+      "body1": [
+        "/Robotiq_2F_85/Robotiq_2F_85/right_outer_finger"
+      ],
+      "localPos0": [
+        3.725291186640334e-09,
+        -7.450580152834618e-09,
+        -3.4324325604018213e-09
+      ],
+      "localPos1": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "localRot0": "(1, -5.5317734e-8, 4.2146844e-8, -2.634178e-9)",
+      "localRot1": "(1, 0, 0, 0)",
+      "axis": null,
+      "lowerLimit": null,
+      "upperLimit": null
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/Joints/finger_joint",
+      "type": "PhysicsRevoluteJoint",
+      "body0": [
+        "/Robotiq_2F_85/Robotiq_2F_85/base_link"
+      ],
+      "body1": [
+        "/Robotiq_2F_85/Robotiq_2F_85/left_outer_knuckle"
+      ],
+      "localPos0": [
+        0.0,
+        -0.03060000017285347,
+        0.054659999907016754
+      ],
+      "localPos1": [
+        0.0,
+        -0.03060000017285347,
+        0.054659999907016754
+      ],
+      "localRot0": "(0.5, 0.5, -0.5, -0.5)",
+      "localRot1": "(0.5, 0.5, -0.5, -0.5)",
+      "axis": "Z",
+      "lowerLimit": 0.0,
+      "upperLimit": 47.0,
+      "drive:angular:physics:targetPosition": 0.0,
+      "physxJoint:jointFriction": 0.0
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/Joints/right_outer_knuckle_joint",
+      "type": "PhysicsRevoluteJoint",
+      "body0": [
+        "/Robotiq_2F_85/Robotiq_2F_85/base_link"
+      ],
+      "body1": [
+        "/Robotiq_2F_85/Robotiq_2F_85/right_outer_knuckle"
+      ],
+      "localPos0": [
+        0.0,
+        0.03060000017285347,
+        0.054659999907016754
+      ],
+      "localPos1": [
+        0.0,
+        0.03060000017285347,
+        0.054659999907016754
+      ],
+      "localRot0": "(0.5, -0.5, 0.5, -0.5)",
+      "localRot1": "(0.5, -0.5, 0.5, -0.5)",
+      "axis": "Z",
+      "lowerLimit": 0.0,
+      "upperLimit": 47.0,
+      "physxJoint:jointFriction": 0.0
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/Joints/right_inner_finger_joint",
+      "type": "PhysicsRevoluteJoint",
+      "body0": [
+        "/Robotiq_2F_85/Robotiq_2F_85/right_outer_finger"
+      ],
+      "body1": [
+        "/Robotiq_2F_85/Robotiq_2F_85/right_inner_finger"
+      ],
+      "localPos0": [
+        0.0,
+        0.06775999814271927,
+        0.09809000045061111
+      ],
+      "localPos1": [
+        0.0,
+        0.06775999814271927,
+        0.09809000045061111
+      ],
+      "localRot0": "(0.5, 0.5, -0.5, -0.5)",
+      "localRot1": "(0.5, 0.5, -0.5, -0.5)",
+      "axis": "Z",
+      "lowerLimit": -180.0,
+      "upperLimit": 180.0,
+      "drive:angular:physics:targetPosition": 0.0,
+      "physxJoint:jointFriction": 0.0
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/Joints/right_inner_finger_knuckle_joint",
+      "type": "PhysicsRevoluteJoint",
+      "body0": [
+        "/Robotiq_2F_85/Robotiq_2F_85/right_inner_finger"
+      ],
+      "body1": [
+        "/Robotiq_2F_85/Robotiq_2F_85/right_inner_knuckle"
+      ],
+      "localPos0": [
+        0.0,
+        0.04986000061035156,
+        0.10459999740123749
+      ],
+      "localPos1": [
+        0.0,
+        0.04986000061035156,
+        0.10459999740123749
+      ],
+      "localRot0": "(0.5, 0.5, -0.5, -0.5)",
+      "localRot1": "(0.5, 0.5, -0.5, -0.5)",
+      "axis": "Z",
+      "lowerLimit": -180.0,
+      "upperLimit": 180.0,
+      "drive:angular:physics:targetPosition": 0.0,
+      "physxJoint:jointFriction": 0.0
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/Joints/left_inner_finger_knuckle_joint",
+      "type": "PhysicsRevoluteJoint",
+      "body0": [
+        "/Robotiq_2F_85/Robotiq_2F_85/left_inner_finger"
+      ],
+      "body1": [
+        "/Robotiq_2F_85/Robotiq_2F_85/left_inner_knuckle"
+      ],
+      "localPos0": [
+        0.0,
+        -0.04986000061035156,
+        0.10459999740123749
+      ],
+      "localPos1": [
+        0.0,
+        -0.04986000061035156,
+        0.10459999740123749
+      ],
+      "localRot0": "(0.5, 0.5, 0.5, 0.5)",
+      "localRot1": "(0.5, 0.5, 0.5, 0.5)",
+      "axis": "Z",
+      "lowerLimit": -180.0,
+      "upperLimit": 180.0,
+      "physxJoint:jointFriction": 0.0
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/Joints/left_inner_finger_joint",
+      "type": "PhysicsRevoluteJoint",
+      "body0": [
+        "/Robotiq_2F_85/Robotiq_2F_85/left_outer_finger"
+      ],
+      "body1": [
+        "/Robotiq_2F_85/Robotiq_2F_85/left_inner_finger"
+      ],
+      "localPos0": [
+        0.0,
+        -0.06775999814271927,
+        0.09809000045061111
+      ],
+      "localPos1": [
+        0.0,
+        -0.06775999814271927,
+        0.09809000045061111
+      ],
+      "localRot0": "(0.5, -0.5, -0.5, 0.5)",
+      "localRot1": "(0.5, -0.5, -0.5, 0.5)",
+      "axis": "Z",
+      "lowerLimit": -180.0,
+      "upperLimit": 180.0,
+      "drive:angular:physics:targetPosition": 0.0,
+      "physxJoint:jointFriction": 0.0
+    }
+  ],
+  "links": [
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/base_link",
+      "type": "Xform",
+      "name": "base_link",
+      "local": {
+        "translate": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "orient_wxyz": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/left_outer_knuckle",
+      "type": "Xform",
+      "name": "left_outer_knuckle",
+      "local": {
+        "translate": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "orient_wxyz": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/left_outer_finger",
+      "type": "Xform",
+      "name": "left_outer_finger",
+      "local": {
+        "translate": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "orient_wxyz": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/left_inner_finger",
+      "type": "Xform",
+      "name": "left_inner_finger",
+      "local": {
+        "translate": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "orient_wxyz": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/left_inner_finger/visuals/Defeatured_2F_85_PAD_OPEN_finger4step_01",
+      "type": "Xform",
+      "name": "Defeatured_2F_85_PAD_OPEN_finger4step_01",
+      "local": {
+        "translate": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "orient_wxyz": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/left_inner_finger/visuals/Defeatured_2F_85_PAD_OPEN_finger4step_01/Defeatured_2F_85_PAD_OPEN_finger4step",
+      "type": "Mesh",
+      "name": "Defeatured_2F_85_PAD_OPEN_finger4step",
+      "local": {
+        "translate": null,
+        "orient_wxyz": null
+      }
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/left_inner_knuckle",
+      "type": "Xform",
+      "name": "left_inner_knuckle",
+      "local": {
+        "translate": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "orient_wxyz": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/right_outer_knuckle",
+      "type": "Xform",
+      "name": "right_outer_knuckle",
+      "local": {
+        "translate": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "orient_wxyz": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/right_outer_finger",
+      "type": "Xform",
+      "name": "right_outer_finger",
+      "local": {
+        "translate": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "orient_wxyz": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/right_inner_finger",
+      "type": "Xform",
+      "name": "right_inner_finger",
+      "local": {
+        "translate": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "orient_wxyz": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/right_inner_finger/visuals/Defeatured_2F_85_PAD_OPEN_finger4step_01",
+      "type": "Xform",
+      "name": "Defeatured_2F_85_PAD_OPEN_finger4step_01",
+      "local": {
+        "translate": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "orient_wxyz": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/right_inner_finger/visuals/Defeatured_2F_85_PAD_OPEN_finger4step_01/Defeatured_2F_85_PAD_OPEN_finger4step",
+      "type": "Mesh",
+      "name": "Defeatured_2F_85_PAD_OPEN_finger4step",
+      "local": {
+        "translate": null,
+        "orient_wxyz": null
+      }
+    },
+    {
+      "path": "/Robotiq_2F_85/Robotiq_2F_85/right_inner_knuckle",
+      "type": "Xform",
+      "name": "right_inner_knuckle",
+      "local": {
+        "translate": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "orient_wxyz": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    }
+  ]
+}

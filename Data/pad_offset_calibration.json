@@ -1,0 +1,12 @@
+{
+  "26.0": {
+    "diameter_mm": 26.0,
+    "TOOL_OFFSET_Z": 0.15516,
+    "ee_z": 1.22387,
+    "closed_inner_finger_z": 1.20192,
+    "C_ANCHOR": 0.1332,
+    "provisional_offset_used": 0.15,
+    "close_rad": 0.55,
+    "measured_at": "20260714_200056"
+  }
+}

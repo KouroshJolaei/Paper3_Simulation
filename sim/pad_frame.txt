@@ -1,0 +1,2 @@
+/World/robot_gripper_adapter_sensor/robot_gripper_adapter_sensor/ur5e/wrist_3_link|pos=[0.83817, -0.10461, 1.05582]|quat_wxyz=[0.00015,-0.00014,0.70711,0.70711]
+/World/robot_gripper_adapter_sensor/robot_gripper_adapter_sensor/TSF_85_right/TSF_85|pos=[0.85233, 0.01682, 1.11826]|quat_wxyz=[0.0,-0.0,0.70711,0.70711]

@@ -40,7 +40,7 @@ print(f"[grid] close={CLOSE_RAD}  output={OUTPUT_DIR}  basename={BASENAME}")
 # Launch Isaac Sim (headless)
 # ============================================================
 from isaacsim import SimulationApp
-simulation_app = SimulationApp({"headless": True, "physics_gpu": 0})
+simulation_app = SimulationApp({"headless": False, "physics_gpu": 0})
 
 import numpy as np, carb
 
@@ -427,61 +427,258 @@ def hold_for(arm_q, seconds):
         world.step(render=True)
 
 # ============================================================
-# Run the single grid-point touch
-# (identical motion to grasp_one.py, just at the grid location)
+# ROTATION MACHINERY — ported from your Paper-2 _incremental_execute
 # ============================================================
+# Pad pivot offset measured in Isaac (probe_tool_frame.py), in the WRIST-LOCAL
+# frame, using YOUR convention n=col0(x), u=col1(y), v=col2(z):
+#   along n (x): -14.2 mm   along u (y): 62.4 mm   along v (z): 121.4 mm
+# Your method builds p_pivot = p_anchor + v_a*L + u_a*W, so:
+PAD_L_M = float(os.environ.get("PAD_L_M", "0.1214"))   # along v_a (col2)
+PAD_W_M = float(os.environ.get("PAD_W_M", "0.0624"))   # along u_a (col1)
+ROT_TEST_DEG = float(os.environ.get("ROT_TEST_DEG", "30.0"))
+
 grasp_world  = np.array([GRASP_X, GRASP_Y, GRASP_Z])
+
+def quat_to_R(qwxyz):
+    """wxyz quaternion -> 3x3 rotation matrix (columns are tool axes in world)."""
+    return rotmat(qwxyz)
+
+def get_tool0_pose_world():
+    """Current wrist/tool0 pose in WORLD: (p[3], R[3x3]).
+    fk() returns EE pose in the robot BASE frame, so convert to world."""
+    q = robot.get_joint_positions()[ai].astype(np.float32)
+    p_base, quat = fk(q)
+    R_base = quat_to_R(quat)
+    # base -> world:  p_world = R_world_base @ p_base + p_base_origin
+    R_wb = rotmat(ROBOT_WORLD_QUAT_WXYZ)
+    p_world = R_wb @ p_base + ROBOT_WORLD_POS
+    R_world = R_wb @ R_base
+    return p_world, R_world
+
+# Find the pad prim once, so we can read its ACTUAL world position each step.
+# (Pivot = real pad point -> the pad rotates about itself, no L/W reconstruction.)
+_PAD_PRIM_PATH = None
+def _find_pad_prim():
+    global _PAD_PRIM_PATH
+    if _PAD_PRIM_PATH is not None:
+        return _PAD_PRIM_PATH
+    hits = []
+    for prim in Usd.PrimRange(stage.GetPrimAtPath(ROBOT_PRIM_PATH)):
+        p = str(prim.GetPath())
+        if p.endswith("TSF_85_right") or "/TSF_85_right" in p:
+            hits.append(p)
+    _PAD_PRIM_PATH = min(hits, key=len) if hits else None
+    return _PAD_PRIM_PATH
+
+def get_pad_point_world():
+    """World position of the pad (rotation pivot)."""
+    path = _find_pad_prim()
+    if path is None:
+        # fallback: tool0 position
+        p, _ = get_tool0_pose_world()
+        return p
+    prim = stage.GetPrimAtPath(path)
+    xc = UsdGeom.XformCache(Usd.TimeCode.Default())
+    m  = xc.GetLocalToWorldTransform(prim)
+    t  = m.ExtractTranslation()
+    return np.array([t[0], t[1], t[2]])
+
+def numerical_jacobian6(q_arm, eps=1e-4):
+    """6x6 geometric Jacobian at q_arm (world frame), via finite differences on FK.
+    Rows 0:3 = linear vel of tool0, rows 3:6 = angular vel (axis-angle rate)."""
+    q0 = np.asarray(q_arm, float)
+    p0, quat0 = fk(q0.astype(np.float32))
+    R_wb = rotmat(ROBOT_WORLD_QUAT_WXYZ)
+    p0w = R_wb @ p0 + ROBOT_WORLD_POS
+    R0w = R_wb @ quat_to_R(quat0)
+    J = np.zeros((6, 6))
+    for j in range(6):
+        dq = q0.copy(); dq[j] += eps
+        pj, quatj = fk(dq.astype(np.float32))
+        pjw = R_wb @ pj + ROBOT_WORLD_POS
+        Rjw = R_wb @ quat_to_R(quatj)
+        # linear part
+        J[0:3, j] = (pjw - p0w) / eps
+        # angular part: dR = Rj @ R0^T -> axis-angle / eps
+        dR = Rjw @ R0w.T
+        # skew-symmetric -> vector
+        w = np.array([dR[2, 1] - dR[1, 2],
+                      dR[0, 2] - dR[2, 0],
+                      dR[1, 0] - dR[0, 1]]) * 0.5
+        J[3:6, j] = w / eps
+    return J
+
+def rotate_pad_in_air(th_deg, n_steps=None, record=False, label="ROT"):
+    """Rotate the pad about its own normal, pivoting at the ACTUAL pad point.
+    Uses the numerical Jacobian + weighted solve for smooth (no-jerk) motion.
+    Pivot = real pad world position (measured), so the pad spins in place rather
+    than sweeping an arc about a reconstructed L/W point.
+    Pad normal = wrist-local X (column 0), confirmed by probe_pad_normal.py."""
+    th_req = float(th_deg)
+    N = int(np.clip(max(60, abs(th_req) / 0.2), 2, 1000)) if n_steps is None else n_steps
+    dth_seg = np.radians(th_req) / N
+    Kp_leash = 0.7
+
+    # anchor: pad point + normal at the START (the fixed pivot)
+    pad0 = get_pad_point_world()
+    _, R_anchor = get_tool0_pose_world()
+    n_a = R_anchor[:, 0]; n_a = n_a / (np.linalg.norm(n_a) + 1e-12)
+
+    print(f"[{label}] rotating {th_req:.1f} deg about pad normal at pad point "
+          f"{pad0.round(3)}, N={N} steps")
+
+    if record:
+        _tsf.set("/exts/TSF_85_Ext/record_active", True)
+
+    for k in range(1, N):
+        q_curr = robot.get_joint_positions()[ai].astype(np.float32)
+        p_tool, R_now = get_tool0_pose_world()
+        n = R_now[:, 0]; n = n / (np.linalg.norm(n) + 1e-12)
+        pad_now = get_pad_point_world()
+
+        # spin about the pad normal
+        w_slice = dth_seg * n
+
+        # keep the PAD POINT fixed: tool0 origin moves with w x (p_tool - pad_pivot)
+        r_vec  = p_tool - pad0
+        v_keep = np.cross(w_slice, r_vec)
+
+        # leash: pull the pad back to its fixed anchor (no drift)
+        v_correct = -Kp_leash * (pad_now - pad0)
+
+        v_final = v_keep + v_correct
+
+        xi = np.zeros(6)
+        xi[:3] = v_final
+        xi[3:] = w_slice
+
+        Jk = numerical_jacobian6(q_curr)
+        W = np.diag([1.0, 1.0, 1.0, 50.0, 50.0, 50.0])  # match the rotation strongly
+        H = Jk.T @ W @ Jk + (0.05 ** 2) * np.eye(6)
+        dq = np.linalg.solve(H, Jk.T @ W @ xi)
+
+        q_next = q_curr + dq.astype(np.float32)
+        apply_arm_and_grip(q_next)
+        world.step(render=True)
+
+    if record:
+        _tsf.set("/exts/TSF_85_Ext/record_active", False)
+    moved = np.linalg.norm(get_pad_point_world() - pad0) * 1000
+    print(f"[{label}] rotation done. pad drifted {moved:.1f} mm from pivot.")
+
+
 up_world     = grasp_world.copy()
 up_world[2] += APPROACH_H
 up_base      = world_to_base(up_world)
+
+def do_grasp_and_record(q_start_up, tag):
+    """Descend UP->grasp, record close/hold/open, ascend back to UP.
+    Records into files prefixed BASENAME_<tag>. Returns q at UP after ascent."""
+    print(f"[rot] descent UP->GRASP ({tag}) ...")
+    dz_dn = -float(np.linalg.norm(grasp_world - up_world))
+    traj_dn = plan_stitched_z(q_start_up, dz_dn, f"{tag}:DOWN")
+    if traj_dn is None:
+        print(f"[rot] descent FAILED ({tag}).")
+        return None
+    run_traj(traj_dn)
+    q_grasp = robot.get_joint_positions()[ai].copy()
+    hold_qg = q_grasp.astype(np.float32)
+
+    hold_for(hold_qg, WAIT_GRASP_SECONDS)
+
+    # The TSF extension locks base_name at startup, so we DON'T change it mid-run.
+    # It writes to {BASENAME}_s1/s2_tactile_maps.csv. After recording we copy those
+    # to tagged names ({BASENAME}_{tag}_s1/s2_...) so before/after stay separate.
+    _tsf.set("/exts/TSF_85_Ext/record_active", True)
+    print(f"[rot] [RECORD ON] {tag}: close -> hold -> open ...")
+    ramp_gripper(hold_qg, CLOSE_RAD, GRIPPER_RAMP_FRAMES)
+    hold_for(hold_qg, WAIT_HOLD_SECONDS)
+    ramp_gripper(hold_qg, GRIPPER_OPEN, GRIPPER_RAMP_FRAMES)
+    _tsf.set("/exts/TSF_85_Ext/record_active", False)
+    print(f"[rot] [RECORD OFF] {tag}")
+
+    # let the extension flush/close its CSVs before we copy them
+    for _ in range(90):
+        apply_arm_and_grip(hold_qg)
+        world.step(render=True)
+
+    import shutil, glob
+    for s in ("s1", "s2"):
+        src = os.path.join(OUTPUT_DIR, f"{BASENAME}_{s}_tactile_maps.csv")
+        dst = os.path.join(OUTPUT_DIR, f"{BASENAME}_{tag}_{s}_tactile_maps.csv")
+        try:
+            if os.path.exists(src):
+                shutil.copyfile(src, dst)
+                sz = os.path.getsize(dst)
+                print(f"[rot] saved {tag} {s}: {dst} ({sz} bytes)")
+            else:
+                print(f"[rot] WARNING: expected {src} not found for {tag} {s}")
+        except Exception as e:
+            print(f"[rot] WARNING: copy failed for {tag} {s}: {e}")
+
+    print(f"[rot] ascent GRASP->UP ({tag}) ...")
+    dz_up = float(np.linalg.norm(up_world - grasp_world))
+    traj_up2 = plan_stitched_z(q_grasp, dz_up, f"{tag}:UP")
+    if traj_up2 is not None:
+        run_traj(traj_up2)
+
+    # The TSF extension locks base_name at startup, so it writes to BASENAME_s1/s2.
+    # Copy those to tag-specific names so before/after don't overwrite each other.
+    import shutil, glob, time as _t
+    _t.sleep(0.5)  # let the logger flush
+    for s in ("s1", "s2"):
+        for kind in ("tactile_maps", "deformations", "mesh_state"):
+            src = os.path.join(OUTPUT_DIR, f"{BASENAME}_{s}_{kind}.csv")
+            dst = os.path.join(OUTPUT_DIR, f"{BASENAME}_{tag}_{s}_{kind}.csv")
+            if os.path.exists(src):
+                shutil.copy(src, dst)
+                print(f"[rot] saved {os.path.basename(dst)} ({os.path.getsize(dst)} bytes)")
+    return robot.get_joint_positions()[ai].copy()
 
 EXIT_CODE = 0
 try:
     q = initial_q.copy()
 
-    print(f"[grid] free move to UP {up_world} ...")
-    traj_up = plan_free_move(q, up_base, f"{LABEL}:to-up")
+    print(f"[rot] free move to UP {up_world} ...")
+    traj_up = plan_free_move(q, up_base, "to-up")
     if traj_up is None:
-        print(f"[grid] FAILED to reach UP. Exiting.")
+        print("[rot] FAILED to reach UP. Exiting.")
         EXIT_CODE = 2
     else:
         run_traj(traj_up)
         q_up = robot.get_joint_positions()[ai].copy()
 
-        print(f"[grid] straight descent UP->GRASP ...")
-        dz_dn = -float(np.linalg.norm(grasp_world - up_world))
-        traj_dn = plan_stitched_z(q_up, dz_dn, f"{LABEL}:DOWN")
-        if traj_dn is None:
-            print(f"[grid] descent FAILED. Exiting.")
+        # ===== GRASP #1 : BEFORE rotation =====
+        print("\n========== GRASP 1 (BEFORE rotation) ==========")
+        q_up = do_grasp_and_record(q_up, "before")
+        if q_up is None:
             EXIT_CODE = 3
         else:
-            run_traj(traj_dn)
-            q_grasp = robot.get_joint_positions()[ai].copy()
-            hold_qg = q_grasp.astype(np.float32)
+            hold_for(robot.get_joint_positions()[ai].astype(np.float32), 1.0)
 
-            # settle (not recorded)
-            hold_for(hold_qg, WAIT_GRASP_SECONDS)
+            # ===== ROTATE PAD IN AIR (no contact), 30 deg =====
+            print("\n========== ROTATE PAD IN AIR (watch the window) ==========")
+            print(">>> LOOK NOW: pad should spin about its OWN point, smoothly (no jerk) <<<")
+            rotate_pad_in_air(ROT_TEST_DEG, record=False, label="ROT-AIR")
+            for _ in range(60):
+                apply_arm_and_grip(robot.get_joint_positions()[ai].astype(np.float32))
+                world.step(render=True)
+            q_up_rot = robot.get_joint_positions()[ai].copy()
 
-            # RECORD ON -> close -> hold -> open -> RECORD OFF
-            _tsf.set("/exts/TSF_85_Ext/record_active", True)
-            print(f"[grid] [RECORD ON] close -> hold -> open ...")
-            ramp_gripper(hold_qg, CLOSE_RAD, GRIPPER_RAMP_FRAMES)
-            hold_for(hold_qg, WAIT_HOLD_SECONDS)
-            ramp_gripper(hold_qg, GRIPPER_OPEN, GRIPPER_RAMP_FRAMES)
-            _tsf.set("/exts/TSF_85_Ext/record_active", False)
-            print(f"[grid] [RECORD OFF]")
+            # ===== GRASP #2 : AFTER rotation =====
+            # Re-descend straight down from the (now rotated) UP pose, so the pad
+            # keeps its rotated orientation while grasping -> contact should tilt.
+            print("\n========== GRASP 2 (AFTER rotation) ==========")
+            q_after = do_grasp_and_record(q_up_rot, "after")
 
-            # ascent (not recorded)
-            print(f"[grid] straight ascent GRASP->UP ...")
-            dz_up = float(np.linalg.norm(up_world - grasp_world))
-            traj_up2 = plan_stitched_z(q_grasp, dz_up, f"{LABEL}:UP")
-            if traj_up2 is not None:
-                run_traj(traj_up2)
-
-            print(f"[grid] SUCCESS. Data in {OUTPUT_DIR} (prefix {BASENAME})")
+            print("\n[rot] SEQUENCE DONE.")
+            print(f"[rot] before: {OUTPUT_DIR}/{BASENAME}_before_s1_tactile_maps.csv (+s2)")
+            print(f"[rot] after:  {OUTPUT_DIR}/{BASENAME}_after_s1_tactile_maps.csv (+s2)")
 finally:
-    for _ in range(30):
+    print("[rot] holding window 8s before close...")
+    for _ in range(8 * 60):
         world.step(render=True)
     simulation_app.close()
 
 sys.exit(EXIT_CODE)
+

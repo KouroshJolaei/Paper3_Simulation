@@ -1,0 +1,4 @@
+/World/robot_gripper_adapter_sensor/Object_01 | type=Xform | rigidbody=True | collider=False | kinematic=False
+/World/robot_gripper_adapter_sensor/Object_02 | type=Xform | rigidbody=True | collider=False | kinematic=False
+/World/robot_gripper_adapter_sensor/Object_02/Cylinder | type=Mesh | rigidbody=False | collider=True | kinematic=None
+/World/robot_gripper_adapter_sensor/Object_03 | type=Xform | rigidbody=True | collider=False | kinematic=False

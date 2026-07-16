@@ -1,0 +1,61 @@
+{
+  "generated": "20260715_173930",
+  "config": "/home/kourosh/Paper3_Simulation/Data/gui_config.json",
+  "object_center_mm": [
+    -268.06,
+    199.0,
+    1052.2
+  ],
+  "diameter_mm": 26.0,
+  "TOOL_OFFSET_Z": 0.15516,
+  "settings": {
+    "max_joint_step": 0.02,
+    "max_steps_cap": 500,
+    "cond_max_warn": 1000.0,
+    "pos_tol_m": 0.001,
+    "rot_tol_deg": 0.5,
+    "manual_limits": {
+      "frozen_joints": [],
+      "one_sided": {},
+      "delta_bounds": {},
+      "per_iter_dq_cap": null,
+      "abs_limits": null
+    }
+  },
+  "points": [
+    {
+      "index": 0,
+      "pad_offset_y_mm": 0.0,
+      "pad_offset_z_mm": 0.0,
+      "pad_target_world_mm": [
+        -268.06,
+        199.0,
+        1052.2
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        199.0,
+        1207.36
+      ],
+      "q_goal_rad": [
+        -0.8564505577087402,
+        -2.006692886352539,
+        -1.771570086479187,
+        -0.9343310594558716,
+        1.5713087320327759,
+        -0.856249213218689
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "limit_hits": [],
+      "iters": 45,
+      "n_steps": 46,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.13856305390011905
+    }
+  ],
+  "n_points": 1,
+  "n_reachable": 1,
+  "n_unreachable": 0
+}

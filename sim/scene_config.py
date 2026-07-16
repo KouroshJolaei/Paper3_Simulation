@@ -43,6 +43,28 @@ CYL_LENGTH   = 0.140     # 140 mm
 CYL_AXIS     = "Z"       # long axis points up (world Z) = standing cylinder
 
 # ============================================================
+# OBJECT POSE — YOU EDIT THIS  (step 2)
+# Where the object sits in the scene, and how it's oriented. The collector
+# (grasp_one_grid_v2.py) bolts the object at this exact pose with a fixed
+# joint, so it stays put AND the sensor still reads contact.
+#
+# OBJECT_POS = world position of the object CENTER [x, y, z] in meters.
+# OBJECT_ORIENT = one of:
+#   "standing"          long axis vertical (world Z) — a standing can
+#   "horizontal_x"      lying down, long axis along world X
+#   "horizontal_y"      lying down, long axis along world Y
+#   "horizontal_y_tilt" lying along Y, then tilted by OBJECT_TILT_DEG about X
+#   "tilt_x"            standing, tilted by OBJECT_TILT_DEG about X
+# OBJECT_TILT_DEG = tilt angle for the *_tilt orientations.
+# ============================================================
+OBJECT_POS      = [-0.26806, 0.199, 1.0522]   # object center (world m)
+OBJECT_ORIENT   = "standing"
+# OBJECT_ORIENT   = "horizontal_y"
+# OBJECT_ORIENT = "horizontal_y_tilt"
+
+OBJECT_TILT_DEG = 20.0
+
+# ============================================================
 # SCENE REFERENCE POINTS (read from the scene earlier) — for the map view
 # ============================================================
 ORIGIN     = np.array([0.0, 0.0, 0.0])              # world origin (scene zero)
@@ -74,7 +96,7 @@ N_ALONG  = 3        # points along  (vertical, up/down the cylinder)
 STEP     = 0.004    # 4 mm between grid points
 
 # In-plane rotations to preview (degrees). [0] = no rotation.
-ROTATIONS_DEG = [30]
+ROTATIONS_DEG = [0]
 
 # ============================================================
 # Build the grid of pad poses (pure data)
@@ -154,6 +176,10 @@ def save_grid_and_scene():
             "diameter_m": CYL_DIAMETER,
             "length_m": CYL_LENGTH,
             "long_axis": CYL_AXIS,
+            # pose you set in this config (collector bolts the object here):
+            "pose_world": list(OBJECT_POS),
+            "orientation": OBJECT_ORIENT,
+            "tilt_deg": OBJECT_TILT_DEG,
         },
         "robot_base_world": ROBOT_BASE.tolist(),
         "origin_world": ORIGIN.tolist(),
@@ -182,6 +208,48 @@ def save_grid_and_scene():
 
 
 
+def object_axis_endpoints():
+    """Return the two endpoints (world xyz) of the cylinder's LONG axis and its
+    radius, given OBJECT_POS / OBJECT_ORIENT / OBJECT_TILT_DEG. Used by the
+    preview to draw the cylinder in its actual orientation."""
+    c = np.array(OBJECT_POS, dtype=float)
+    half = CYL_LENGTH / 2.0
+    r = CYL_DIAMETER / 2.0
+    t = np.deg2rad(OBJECT_TILT_DEG)
+
+    # unit vector along the cylinder's long axis in WORLD, per orientation
+    if OBJECT_ORIENT == "standing":
+        axis = np.array([0.0, 0.0, 1.0])
+    elif OBJECT_ORIENT == "horizontal_x":
+        axis = np.array([1.0, 0.0, 0.0])
+    elif OBJECT_ORIENT == "horizontal_y":
+        axis = np.array([0.0, 1.0, 0.0])
+    elif OBJECT_ORIENT == "horizontal_y_tilt":
+        # lying along Y, tilted by t about X: axis rotates in the Y-Z plane
+        axis = np.array([0.0, np.cos(t), np.sin(t)])
+    elif OBJECT_ORIENT == "tilt_x":
+        # standing, tilted by t about X: axis rotates from Z toward Y
+        axis = np.array([0.0, np.sin(t), np.cos(t)])
+    else:
+        axis = np.array([0.0, 0.0, 1.0])
+
+    p1 = c - half * axis
+    p2 = c + half * axis
+    return p1, p2, r, axis
+
+
+def _draw_capsule(ax, a, b, r, i, j):
+    """Draw a cylinder seen in a 2D projection as a thick line between its two
+    end points a,b (using world component indices i,j for the two plot axes)."""
+    ax.plot([a[i], b[i]], [a[j], b[j]],
+            color="0.6", linewidth=max(2.0, r * 6000), solid_capstyle="round",
+            zorder=1)
+    # end caps as small circles
+    for pt in (a, b):
+        ax.add_patch(patches.Circle((pt[i], pt[j]), r,
+                                    facecolor="0.8", edgecolor="0.4", zorder=2))
+
+
 def preview():
     pts = build_pad_grid()
 
@@ -200,20 +268,30 @@ def preview():
     axM.plot(ROBOT_BASE[0], ROBOT_BASE[1], marker="s", color="tab:blue", markersize=10)
     axM.annotate("robot base", (ROBOT_BASE[0], ROBOT_BASE[1]),
                  textcoords="offset points", xytext=(6, 6), fontsize=8, color="tab:blue")
-    # cylinder (circle from above: diameter)
-    axM.add_patch(patches.Circle((CYL_CENTER[0], CYL_CENTER[1]), CYL_DIAMETER/2,
-                                 facecolor="0.8", edgecolor="0.4"))
-    axM.annotate("cylinder", (CYL_CENTER[0], CYL_CENTER[1]),
+    # cylinder drawn in its ACTUAL orientation (top-down: X vs Y, indices 0,1)
+    p1, p2, r, axis = object_axis_endpoints()
+    if OBJECT_ORIENT == "standing":
+        # seen from above a standing cylinder is just a circle
+        axM.add_patch(patches.Circle((OBJECT_POS[0], OBJECT_POS[1]), r,
+                                     facecolor="0.8", edgecolor="0.4"))
+    else:
+        _draw_capsule(axM, p1, p2, r, 0, 1)
+    axM.annotate("cylinder", (OBJECT_POS[0], OBJECT_POS[1]),
                  textcoords="offset points", xytext=(6, 6), fontsize=8)
     axM.set_xlabel("world X (m)"); axM.set_ylabel("world Y (m)")
     axM.set_aspect("equal"); axM.grid(True, alpha=0.3); axM.autoscale_view()
 
     # ---------- FRONT VIEW (looking at the +Y face): Y across, Z up ----------
     axF.set_title("Front view (pad face)\nyellow = pad footprints")
-    cyl_y0 = CYL_CENTER[1] - CYL_DIAMETER/2
-    cyl_z0 = CYL_CENTER[2] - CYL_LENGTH/2
-    axF.add_patch(patches.Rectangle((cyl_y0, cyl_z0), CYL_DIAMETER, CYL_LENGTH,
-                                    facecolor="0.8", edgecolor="0.4", label="cylinder"))
+    # cylinder in actual orientation, projected to (Y, Z) = indices 1,2
+    if OBJECT_ORIENT == "standing":
+        cyl_y0 = OBJECT_POS[1] - CYL_DIAMETER/2
+        cyl_z0 = OBJECT_POS[2] - CYL_LENGTH/2
+        axF.add_patch(patches.Rectangle((cyl_y0, cyl_z0), CYL_DIAMETER, CYL_LENGTH,
+                                        facecolor="0.8", edgecolor="0.4", label="cylinder"))
+    else:
+        _draw_capsule(axF, p1, p2, r, 1, 2)
+        axF.plot([], [], color="0.6", linewidth=4, label="cylinder")  # legend proxy
     for p in pts:
         _draw_pad(axF, p["y"], p["z"], PAD_SHORT, PAD_LONG, p["rot"])
     axF.set_xlabel("world Y (m) — across"); axF.set_ylabel("world Z (m) — up/down")
@@ -222,11 +300,14 @@ def preview():
 
     # ---------- SIDE VIEW (looking along Y): X depth, Z up ----------
     axS.set_title("Side view\n(pad approaches from +Y)")
-    axS.add_patch(patches.Rectangle((CYL_CENTER[0]-CYL_DIAMETER/2, cyl_z0),
-                                    CYL_DIAMETER, CYL_LENGTH,
-                                    facecolor="0.8", edgecolor="0.4"))
+    if OBJECT_ORIENT == "standing":
+        axS.add_patch(patches.Rectangle((OBJECT_POS[0]-CYL_DIAMETER/2, cyl_z0),
+                                        CYL_DIAMETER, CYL_LENGTH,
+                                        facecolor="0.8", edgecolor="0.4"))
+    else:
+        _draw_capsule(axS, p1, p2, r, 0, 2)  # X depth, Z up = indices 0,2
     for p in pts:
-        axS.plot([CYL_CENTER[0]-CYL_DIAMETER/2 - 0.002], [p["z"]],
+        axS.plot([OBJECT_POS[0]-CYL_DIAMETER/2 - 0.002], [p["z"]],
                  marker="s", color="orange", markersize=6)
     axS.set_xlabel("world X (m) — depth"); axS.set_ylabel("world Z (m) — up/down")
     axS.set_aspect("equal"); axS.autoscale_view()
@@ -235,7 +316,7 @@ def preview():
         f"Pad grid preview — {N_ACROSS}x{N_ALONG} points, {STEP*1000:.0f} mm step, "
         f"rotations={ROTATIONS_DEG}\n"
         f"cylinder: {CYL_LENGTH*1000:.0f} mm tall, {CYL_DIAMETER*1000:.0f} mm dia "
-        f"(standing) | pad: {PAD_LONG*1000:.0f} x {PAD_SHORT*1000:.0f} mm",
+        f"| object: {OBJECT_ORIENT} | pad: {PAD_LONG*1000:.0f} x {PAD_SHORT*1000:.0f} mm",
         fontsize=10)
     fig.tight_layout()
     plt.show()

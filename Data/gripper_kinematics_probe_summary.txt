@@ -1,0 +1,53 @@
+========================================================================
+gripper_kinematics_probe OK: 8 joints, 13 links
+json: /home/kourosh/Paper3_Simulation/Data/gripper_kinematics_probe.json
+------------------------------------------------------------------------
+JOINTS:
+  /Robotiq_2F_85/Robotiq_2F_85/left_outer_finger/FixedJoint
+     type=PhysicsFixedJoint axis=None limits=(None,None)
+     body0=['/Robotiq_2F_85/Robotiq_2F_85/left_outer_knuckle']  localPos0=[7.4505797087454084e-09, 7.450580152834618e-09, 3.874450094087933e-09]
+     body1=['/Robotiq_2F_85/Robotiq_2F_85/left_outer_finger']  localPos1=[0.0, 0.0, 0.0]
+  /Robotiq_2F_85/Robotiq_2F_85/right_outer_finger/FixedJoint
+     type=PhysicsFixedJoint axis=None limits=(None,None)
+     body0=['/Robotiq_2F_85/Robotiq_2F_85/right_outer_knuckle']  localPos0=[3.725291186640334e-09, -7.450580152834618e-09, -3.4324325604018213e-09]
+     body1=['/Robotiq_2F_85/Robotiq_2F_85/right_outer_finger']  localPos1=[0.0, 0.0, 0.0]
+  /Robotiq_2F_85/Robotiq_2F_85/Joints/finger_joint
+     type=PhysicsRevoluteJoint axis=Z limits=(0.0,47.0)
+     body0=['/Robotiq_2F_85/Robotiq_2F_85/base_link']  localPos0=[0.0, -0.03060000017285347, 0.054659999907016754]
+     body1=['/Robotiq_2F_85/Robotiq_2F_85/left_outer_knuckle']  localPos1=[0.0, -0.03060000017285347, 0.054659999907016754]
+  /Robotiq_2F_85/Robotiq_2F_85/Joints/right_outer_knuckle_joint
+     type=PhysicsRevoluteJoint axis=Z limits=(0.0,47.0)
+     body0=['/Robotiq_2F_85/Robotiq_2F_85/base_link']  localPos0=[0.0, 0.03060000017285347, 0.054659999907016754]
+     body1=['/Robotiq_2F_85/Robotiq_2F_85/right_outer_knuckle']  localPos1=[0.0, 0.03060000017285347, 0.054659999907016754]
+  /Robotiq_2F_85/Robotiq_2F_85/Joints/right_inner_finger_joint
+     type=PhysicsRevoluteJoint axis=Z limits=(-180.0,180.0)
+     body0=['/Robotiq_2F_85/Robotiq_2F_85/right_outer_finger']  localPos0=[0.0, 0.06775999814271927, 0.09809000045061111]
+     body1=['/Robotiq_2F_85/Robotiq_2F_85/right_inner_finger']  localPos1=[0.0, 0.06775999814271927, 0.09809000045061111]
+  /Robotiq_2F_85/Robotiq_2F_85/Joints/right_inner_finger_knuckle_joint
+     type=PhysicsRevoluteJoint axis=Z limits=(-180.0,180.0)
+     body0=['/Robotiq_2F_85/Robotiq_2F_85/right_inner_finger']  localPos0=[0.0, 0.04986000061035156, 0.10459999740123749]
+     body1=['/Robotiq_2F_85/Robotiq_2F_85/right_inner_knuckle']  localPos1=[0.0, 0.04986000061035156, 0.10459999740123749]
+  /Robotiq_2F_85/Robotiq_2F_85/Joints/left_inner_finger_knuckle_joint
+     type=PhysicsRevoluteJoint axis=Z limits=(-180.0,180.0)
+     body0=['/Robotiq_2F_85/Robotiq_2F_85/left_inner_finger']  localPos0=[0.0, -0.04986000061035156, 0.10459999740123749]
+     body1=['/Robotiq_2F_85/Robotiq_2F_85/left_inner_knuckle']  localPos1=[0.0, -0.04986000061035156, 0.10459999740123749]
+  /Robotiq_2F_85/Robotiq_2F_85/Joints/left_inner_finger_joint
+     type=PhysicsRevoluteJoint axis=Z limits=(-180.0,180.0)
+     body0=['/Robotiq_2F_85/Robotiq_2F_85/left_outer_finger']  localPos0=[0.0, -0.06775999814271927, 0.09809000045061111]
+     body1=['/Robotiq_2F_85/Robotiq_2F_85/left_inner_finger']  localPos1=[0.0, -0.06775999814271927, 0.09809000045061111]
+------------------------------------------------------------------------
+LINKS (finger/knuckle/pad/adapter):
+  base_link                Xform  translate=[0.0, 0.0, 0.0]  /Robotiq_2F_85/Robotiq_2F_85/base_link
+  left_outer_knuckle       Xform  translate=[0.0, 0.0, 0.0]  /Robotiq_2F_85/Robotiq_2F_85/left_outer_knuckle
+  left_outer_finger        Xform  translate=[0.0, 0.0, 0.0]  /Robotiq_2F_85/Robotiq_2F_85/left_outer_finger
+  left_inner_finger        Xform  translate=[0.0, 0.0, 0.0]  /Robotiq_2F_85/Robotiq_2F_85/left_inner_finger
+  Defeatured_2F_85_PAD_OPEN_finger4step_01 Xform  translate=[0.0, 0.0, 0.0]  /Robotiq_2F_85/Robotiq_2F_85/left_inner_finger/visuals/Defeatured_2F_85_PAD_OPEN_finger4step_01
+  Defeatured_2F_85_PAD_OPEN_finger4step Mesh   translate=None  /Robotiq_2F_85/Robotiq_2F_85/left_inner_finger/visuals/Defeatured_2F_85_PAD_OPEN_finger4step_01/Defeatured_2F_85_PAD_OPEN_finger4step
+  left_inner_knuckle       Xform  translate=[0.0, 0.0, 0.0]  /Robotiq_2F_85/Robotiq_2F_85/left_inner_knuckle
+  right_outer_knuckle      Xform  translate=[0.0, 0.0, 0.0]  /Robotiq_2F_85/Robotiq_2F_85/right_outer_knuckle
+  right_outer_finger       Xform  translate=[0.0, 0.0, 0.0]  /Robotiq_2F_85/Robotiq_2F_85/right_outer_finger
+  right_inner_finger       Xform  translate=[0.0, 0.0, 0.0]  /Robotiq_2F_85/Robotiq_2F_85/right_inner_finger
+  Defeatured_2F_85_PAD_OPEN_finger4step_01 Xform  translate=[0.0, 0.0, 0.0]  /Robotiq_2F_85/Robotiq_2F_85/right_inner_finger/visuals/Defeatured_2F_85_PAD_OPEN_finger4step_01
+  Defeatured_2F_85_PAD_OPEN_finger4step Mesh   translate=None  /Robotiq_2F_85/Robotiq_2F_85/right_inner_finger/visuals/Defeatured_2F_85_PAD_OPEN_finger4step_01/Defeatured_2F_85_PAD_OPEN_finger4step
+  right_inner_knuckle      Xform  translate=[0.0, 0.0, 0.0]  /Robotiq_2F_85/Robotiq_2F_85/right_inner_knuckle
+========================================================================

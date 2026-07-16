@@ -40,7 +40,7 @@ print(f"[grid] close={CLOSE_RAD}  output={OUTPUT_DIR}  basename={BASENAME}")
 # Launch Isaac Sim (headless)
 # ============================================================
 from isaacsim import SimulationApp
-simulation_app = SimulationApp({"headless": True, "physics_gpu": 0})
+simulation_app = SimulationApp({"headless": False, "physics_gpu": 0})
 
 import numpy as np, carb
 
@@ -414,6 +414,39 @@ def plan_stitched_z(start_q, dz, label):
         cur_q = tr[-1].copy()
     return np.array(stitched)
 
+def plan_stitched_to(start_q, target_base_pos, label, n_steps=None):
+    """Straight-line EE move from current position to target_base_pos (in BASE
+    frame), in small steps, holding orientation. Forces a DIRECT slide — no
+    cuRobo free-plan detour through home. Use for point-to-point moves."""
+    metric = PoseCostMetric(hold_partial_pose=True,
+        hold_vec_weight=mg.tensor_args.to_device(
+            np.array(CASE13_WEIGHT, dtype=np.float32)))
+    cfg = MotionGenPlanConfig(enable_graph=False, max_attempts=4,
+                              enable_finetune_trajopt=False, pose_cost_metric=metric)
+    N = N_STEPS if n_steps is None else n_steps
+    cur_q = start_q.copy()
+    cpos0, _ = fk(cur_q)
+    delta = (np.asarray(target_base_pos, float) - cpos0) / N
+    stitched = []
+    for i in range(N):
+        cpos, cquat = fk(cur_q)
+        tgt = cpos + delta
+        s = JointState.from_position(
+                ta.to_device(cur_q.astype(np.float32)).view(1, -1),
+                joint_names=ARM_JOINT_NAMES)
+        g = Pose(position=ta.to_device(tgt.astype(np.float32)).view(1, 3),
+                 quaternion=ta.to_device(cquat.astype(np.float32)).view(1, 4))
+        r = mg.plan_single(s, g, cfg)
+        if not r.success.item():
+            print(f"  [{label}] step {i+1}/{N} FAILED ({r.status})")
+            return None
+        tr = r.get_interpolated_plan().position.cpu().numpy()
+        if stitched: tr = tr[1:]
+        stitched.extend(list(tr))
+        cur_q = tr[-1].copy()
+    return np.array(stitched)
+
+
 def ramp_gripper(arm_q, target, n_frames):
     cur_g = float(robot.get_joint_positions()[gi[0]])
     for k in range(n_frames):
@@ -426,62 +459,260 @@ def hold_for(arm_q, seconds):
         apply_arm_and_grip(arm_q)
         world.step(render=True)
 
+# ---- pad frame reader (for verification: position + orientation) ----
+_PAD_PATH = None
+def _pad_prim_path():
+    global _PAD_PATH
+    if _PAD_PATH is not None:
+        return _PAD_PATH
+    hits = []
+    for prim in Usd.PrimRange(stage.GetPrimAtPath(ROBOT_PRIM_PATH)):
+        p = str(prim.GetPath())
+        if p.endswith("TSF_85_right") or "/TSF_85_right" in p:
+            hits.append(p)
+    _PAD_PATH = min(hits, key=len) if hits else None
+    return _PAD_PATH
+
+def pad_pose_world():
+    """Return (pos[3], R[3x3]) of the pad frame in WORLD. R columns = pad axes."""
+    path = _pad_prim_path()
+    prim = stage.GetPrimAtPath(path)
+    xc = UsdGeom.XformCache(Usd.TimeCode.Default())
+    m  = xc.GetLocalToWorldTransform(prim)
+    t  = m.ExtractTranslation()
+    R  = np.array(m.ExtractRotationMatrix()).T
+    return np.array([t[0], t[1], t[2]]), R
+
+def solve_ik(target_world, seed_q, label):
+    """One cuRobo IK call: joint angles that place the tool at target_world
+    (approach-height pose), orientation held = tq. No path planning."""
+    tb = world_to_base(target_world)
+    s = JointState.from_position(
+            ta.to_device(seed_q.astype(np.float32)).view(1, -1),
+            joint_names=ARM_JOINT_NAMES)
+    g = Pose(position=ta.to_device(tb.astype(np.float32)).view(1, 3),
+             quaternion=ta.to_device(tq.astype(np.float32)).view(1, 4))
+    r = mg.plan_single(s, g, MotionGenPlanConfig(max_attempts=5, enable_graph=False))
+    if not r.success.item():
+        print(f"  [{label}] IK FAILED ({r.status})")
+        return None
+    # take the final joint config of the plan = IK solution at the target
+    return r.get_interpolated_plan().position.cpu().numpy()[-1].copy()
+
+def move_joint_line(q_from, q_to, label, max_step=0.01, log=None):
+    """Move the arm in a STRAIGHT JOINT-SPACE line from q_from to q_to.
+    Direct interpolation, applied step by step. Cannot detour or flail —
+    it's the shortest path in joint space. Used for between-points moves.
+    If log is a dict, records tool0 world pose at each step (for verification)."""
+    q_from = np.asarray(q_from, float); q_to = np.asarray(q_to, float)
+    dq = q_to - q_from
+    N = int(np.clip(np.ceil(np.max(np.abs(dq)) / max_step), 2, 400))
+    print(f"[sess] {label}: joint-line move in {N} steps "
+          f"(max joint delta {np.rad2deg(np.max(np.abs(dq))):.1f} deg)")
+    if log is not None:
+        p0, _ = fk(q_from.astype(np.float32))
+        log["q_from"] = q_from.tolist()
+        log["q_to"]   = q_to.tolist()
+        log["ee_from_base"] = p0.tolist()
+        log["ee_path_base"] = [p0.tolist()]
+    for i in range(1, N + 1):
+        qi = q_from + dq * (i / N)
+        apply_arm_and_grip(qi.astype(np.float32))
+        world.step(render=True)
+        if log is not None:
+            pcur, _ = fk(robot.get_joint_positions()[ai].astype(np.float32))
+            log["ee_path_base"].append(pcur.tolist())
+    # settle
+    for _ in range(30):
+        apply_arm_and_grip(q_to.astype(np.float32))
+        world.step(render=True)
+    q_reached = robot.get_joint_positions()[ai].copy()
+    if log is not None:
+        p_final, _ = fk(q_reached.astype(np.float32))
+        p_des,   _ = fk(q_to.astype(np.float32))
+        log["ee_desired_base"] = p_des.tolist()
+        log["ee_actual_base"]  = p_final.tolist()
+        log["q_reached"] = q_reached.tolist()
+    return q_reached
+
 # ============================================================
-# Run the single grid-point touch
-# (identical motion to grasp_one.py, just at the grid location)
+# CONTINUOUS POSE-TO-POSE SESSION (Stage 1 minimal: 2 grasps)
+# One Isaac session. Grasp at point 1 -> record -> release -> move RELATIVELY
+# to point 2 (no home reset) -> grasp -> record. The arm stays near the object
+# the whole time; it never returns to the initial/home pose between grasps.
 # ============================================================
-grasp_world  = np.array([GRASP_X, GRASP_Y, GRASP_Z])
-up_world     = grasp_world.copy()
-up_world[2] += APPROACH_H
-up_base      = world_to_base(up_world)
+
+# Two test points: the proven grasp point, and one shifted +8mm in Y.
+# (Stage 2 will feed the full grid here instead of these two.)
+P1_world = np.array([GRASP_X, GRASP_Y,         GRASP_Z])
+P2_world = np.array([GRASP_X, GRASP_Y + 0.008, GRASP_Z])   # +8mm in Y
+APPROACH = APPROACH_H
+
+def go_to_up_of(point_world, from_q, label, straight=False):
+    """Move to APPROACH height above point.
+    straight=False: cuRobo free-plan (fine for the first big move from home).
+    straight=True : straight-line slide from current pos (direct, no detour)."""
+    up = point_world.copy(); up[2] += APPROACH
+    up_b = world_to_base(up)
+    if straight:
+        traj = plan_stitched_to(from_q, up_b, f"{label}:slide")
+    else:
+        traj = plan_free_move(from_q, up_b, f"{label}:to-up")
+    if traj is None:
+        print(f"[sess] {label}: move to UP FAILED")
+        return None
+    run_traj(traj)
+    return robot.get_joint_positions()[ai].copy()
+
+def grasp_at(point_world, tag, row_marks):
+    """Descend from current UP -> grasp -> record (close/hold/open) -> ascend.
+    Slices ONLY this grasp's new rows into BASENAME_<tag>_s1/s2. Returns q at UP.
+    row_marks: dict tracking how many rows were in each file before this grasp."""
+    q_up = robot.get_joint_positions()[ai].copy()
+    grasp = point_world.copy()
+    up    = point_world.copy(); up[2] += APPROACH
+
+    print(f"[sess] {tag}: descent UP->GRASP ...")
+    dz_dn = -float(np.linalg.norm(grasp - up))
+    traj_dn = plan_stitched_z(q_up, dz_dn, f"{tag}:DOWN")
+    if traj_dn is None:
+        print(f"[sess] {tag}: descent FAILED")
+        return None
+    run_traj(traj_dn)
+    q_grasp = robot.get_joint_positions()[ai].copy()
+    hold_qg = q_grasp.astype(np.float32)
+
+    hold_for(hold_qg, WAIT_GRASP_SECONDS)
+
+    _tsf.set("/exts/TSF_85_Ext/record_active", True)
+    print(f"[sess] {tag}: [RECORD ON] close -> hold -> open ...")
+    ramp_gripper(hold_qg, CLOSE_RAD, GRIPPER_RAMP_FRAMES)
+    hold_for(hold_qg, WAIT_HOLD_SECONDS)
+    ramp_gripper(hold_qg, GRIPPER_OPEN, GRIPPER_RAMP_FRAMES)
+    _tsf.set("/exts/TSF_85_Ext/record_active", False)
+    print(f"[sess] {tag}: [RECORD OFF]")
+
+    print(f"[sess] {tag}: ascent GRASP->UP ...")
+    dz_up = float(np.linalg.norm(up - grasp))
+    traj_up2 = plan_stitched_z(q_grasp, dz_up, f"{tag}:UP")
+    if traj_up2 is not None:
+        run_traj(traj_up2)
+
+    # The TSF extension APPENDS every grasp to BASENAME_s1/s2. Slice out only
+    # the rows added during THIS grasp (from the previous mark to end).
+    import time as _t, csv
+    _t.sleep(0.6)
+    for s in ("s1", "s2"):
+        src = os.path.join(OUTPUT_DIR, f"{BASENAME}_{s}_tactile_maps.csv")
+        dst = os.path.join(OUTPUT_DIR, f"{BASENAME}_{tag}_{s}_tactile_maps.csv")
+        if not os.path.exists(src):
+            continue
+        with open(src) as f:
+            lines = f.readlines()
+        header, body = lines[0], lines[1:]
+        prev = row_marks.get(s, 0)
+        new_body = body[prev:]
+        row_marks[s] = len(body)          # update mark to current end
+        with open(dst, "w") as f:
+            f.write(header); f.writelines(new_body)
+        print(f"[sess] saved {os.path.basename(dst)} ({len(new_body)} new rows)")
+    return robot.get_joint_positions()[ai].copy()
 
 EXIT_CODE = 0
+row_marks = {}   # tracks tactile rows written before each grasp (for clean slicing)
+
+# ---- full-path pad logger: sample pad pose whenever we step the sim ----
+PAD_PATH_LOG = {"active": False, "pts": []}
+def _sample_pad():
+    if PAD_PATH_LOG["active"]:
+        p, R = pad_pose_world()
+        PAD_PATH_LOG["pts"].append(p.tolist())
+
+# wrap world.step so every simulation step samples the pad position
+_orig_step = world.step
+def _logged_step(*a, **k):
+    _orig_step(*a, **k)
+    _sample_pad()
+world.step = _logged_step
+
 try:
     q = initial_q.copy()
 
-    print(f"[grid] free move to UP {up_world} ...")
-    traj_up = plan_free_move(q, up_base, f"{LABEL}:to-up")
-    if traj_up is None:
-        print(f"[grid] FAILED to reach UP. Exiting.")
+    # ---- approach point 1 (from home): cuRobo free-plan is fine here ----
+    print("\n========== POINT 1 ==========")
+    q_up = go_to_up_of(P1_world, q, "P1")
+    if q_up is None:
         EXIT_CODE = 2
     else:
-        run_traj(traj_up)
-        q_up = robot.get_joint_positions()[ai].copy()
-
-        print(f"[grid] straight descent UP->GRASP ...")
-        dz_dn = -float(np.linalg.norm(grasp_world - up_world))
-        traj_dn = plan_stitched_z(q_up, dz_dn, f"{LABEL}:DOWN")
-        if traj_dn is None:
-            print(f"[grid] descent FAILED. Exiting.")
+        # grasp 1
+        q_up = grasp_at(P1_world, "p1", row_marks)
+        if q_up is None:
             EXIT_CODE = 3
         else:
-            run_traj(traj_dn)
-            q_grasp = robot.get_joint_positions()[ai].copy()
-            hold_qg = q_grasp.astype(np.float32)
+            # capture pad frame at START (P1 up, after grasp 1)
+            pad_p1, pad_R1 = pad_pose_world()
+            print(f"[DIAG] after grasp1 ascent, pad at: {pad_p1.round(4)}")
 
-            # settle (not recorded)
-            hold_for(hold_qg, WAIT_GRASP_SECONDS)
+            # ---- RELATIVE move to point 2 ----
+            print("\n========== RELATIVE MOVE P1 -> P2 ==========")
+            print(">>> LOGGING FULL PATH so we can SEE any home detour <<<")
+            # start logging the pad path through the ENTIRE move
+            PAD_PATH_LOG["active"] = True
+            PAD_PATH_LOG["pts"] = []
 
-            # RECORD ON -> close -> hold -> open -> RECORD OFF
-            _tsf.set("/exts/TSF_85_Ext/record_active", True)
-            print(f"[grid] [RECORD ON] close -> hold -> open ...")
-            ramp_gripper(hold_qg, CLOSE_RAD, GRIPPER_RAMP_FRAMES)
-            hold_for(hold_qg, WAIT_HOLD_SECONDS)
-            ramp_gripper(hold_qg, GRIPPER_OPEN, GRIPPER_RAMP_FRAMES)
-            _tsf.set("/exts/TSF_85_Ext/record_active", False)
-            print(f"[grid] [RECORD OFF]")
+            # 1) IK: joint angles for P2's up-pose (seeded from current pose)
+            up2 = P2_world.copy(); up2[2] += APPROACH
+            q_up2_target = solve_ik(up2, q_up, "P1->P2:IK")
+            if q_up2_target is None:
+                EXIT_CODE = 4
+            else:
+                # DIAG: how big is the joint gap the IK wants us to cross?
+                q_now = robot.get_joint_positions()[ai].copy()
+                gap = np.rad2deg(np.abs(np.asarray(q_up2_target) - q_now))
+                print(f"[DIAG] IK joint gap (deg per joint): {gap.round(1)}")
+                print(f"[DIAG] IK max joint gap: {gap.max():.1f} deg")
 
-            # ascent (not recorded)
-            print(f"[grid] straight ascent GRASP->UP ...")
-            dz_up = float(np.linalg.norm(up_world - grasp_world))
-            traj_up2 = plan_stitched_z(q_grasp, dz_up, f"{LABEL}:UP")
-            if traj_up2 is not None:
-                run_traj(traj_up2)
+                # 2) straight joint-space interpolation to it
+                move_log = {}
+                q_up2 = move_joint_line(q_up, q_up2_target, "P1->P2", log=move_log)
 
-            print(f"[grid] SUCCESS. Data in {OUTPUT_DIR} (prefix {BASENAME})")
+                # capture pad frame at END actual (P2 up)
+                pad_p2, pad_R2 = pad_pose_world()
+                PAD_PATH_LOG["active"] = False
+                print(f"[DIAG] after joint-line, pad at: {pad_p2.round(4)}")
+                print(f"[DIAG] pad moved {np.linalg.norm(pad_p2-pad_p1)*1000:.1f} mm "
+                      f"(intended ~8mm). path pts: {len(PAD_PATH_LOG['pts'])}")
+
+                # desired pad pose at P2 up = P1 pad pose shifted by the intended move
+                intended_shift = (P2_world - P1_world)   # world-frame shift
+                pad_p2_desired = pad_p1 + intended_shift
+
+                # save the full verification record
+                import json as _json
+                move_log["P1_world"] = P1_world.tolist()
+                move_log["P2_world"] = P2_world.tolist()
+                move_log["robot_base_world"] = ROBOT_WORLD_POS.tolist()
+                move_log["pad_start_pos"]    = pad_p1.tolist()
+                move_log["pad_start_R"]      = pad_R1.tolist()
+                move_log["pad_end_actual_pos"] = pad_p2.tolist()
+                move_log["pad_end_actual_R"]   = pad_R2.tolist()
+                move_log["pad_end_desired_pos"] = pad_p2_desired.tolist()
+                move_log["pad_end_desired_R"]   = pad_R1.tolist()  # orientation unchanged (parallel move)
+                move_log["pad_full_path"]    = PAD_PATH_LOG["pts"]  # EVERY step's pad position
+                with open(os.path.join(OUTPUT_DIR, "move_p1_to_p2.json"), "w") as f:
+                    _json.dump(move_log, f, indent=2)
+                print(f"[sess] saved move_p1_to_p2.json "
+                      f"({len(PAD_PATH_LOG['pts'])} path points logged)")
+
+                # grasp 2
+                print("\n========== POINT 2 ==========")
+                grasp_at(P2_world, "p2", row_marks)
+                print("\n[sess] CONTINUOUS 2-GRASP SESSION DONE.")
 finally:
-    for _ in range(30):
+    print("[sess] holding window 6s before close...")
+    for _ in range(6 * 60):
         world.step(render=True)
     simulation_app.close()
 
 sys.exit(EXIT_CODE)
+

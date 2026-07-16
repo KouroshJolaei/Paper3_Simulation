@@ -41,6 +41,29 @@ echo "============================================================"
 cp "$GRID_CSV" "$RUN_DIR/" 2>/dev/null
 cp "$HOME/Paper3_Simulation/sim/current_scene.json" "$RUN_DIR/" 2>/dev/null
 
+# Read the object pose from current_scene.json so every grasp bolts the object
+# at the pose you set in scene_config.py. Falls back to "keep" (standing) if the
+# record is missing or python isn't available here.
+SCENE_JSON="$HOME/Paper3_Simulation/sim/current_scene.json"
+OBJ_ORIENT="keep"; OBJ_POS_X=""; OBJ_POS_Y=""; OBJ_POS_Z=""; OBJ_TILT_DEG="20"
+if [ -f "$SCENE_JSON" ]; then
+    read OBJ_ORIENT OBJ_POS_X OBJ_POS_Y OBJ_POS_Z OBJ_TILT_DEG < <(python3 - "$SCENE_JSON" <<'PYEOF'
+import json, sys
+try:
+    o = json.load(open(sys.argv[1]))["object"]
+    pos = o.get("pose_world", [ "", "", "" ])
+    print(o.get("orientation","keep"),
+          pos[0] if len(pos)>0 else "",
+          pos[1] if len(pos)>1 else "",
+          pos[2] if len(pos)>2 else "",
+          o.get("tilt_deg", 20))
+except Exception:
+    print("keep", "", "", "", 20)
+PYEOF
+)
+fi
+echo "[grid] object: orient=$OBJ_ORIENT pos=($OBJ_POS_X,$OBJ_POS_Y,$OBJ_POS_Z) tilt=$OBJ_TILT_DEG"
+
 cd "$EXAMPLES_DIR" || { echo "Cannot cd to $EXAMPLES_DIR"; exit 1; }
 
 TOTAL=$(( $(wc -l < "$GRID_CSV") - 1 ))   # minus header
@@ -67,7 +90,14 @@ tail -n +2 "$GRID_CSV" | while IFS=',' read -r LABEL X Y Z APPROACH CLOSE ROT; d
     GRASP_ROT_DEG="$ROT" GRASP_ROT_AXIS="z" \
     GRASP_OUTPUT_DIR="$RUN_DIR" \
     GRASP_BASENAME="$LABEL" \
-    "$PYTHON_SH" "$GRID_SCRIPT" 2>/dev/null | grep -E "\[grid\] (SUCCESS|FAILED|in-plane|free move FAILED)"
+    OBJ_ORIENT="$OBJ_ORIENT" OBJ_TILT_DEG="$OBJ_TILT_DEG" \
+    OBJ_POS_X="$OBJ_POS_X" OBJ_POS_Y="$OBJ_POS_Y" OBJ_POS_Z="$OBJ_POS_Z" \
+    "$PYTHON_SH" "$GRID_SCRIPT" > "$RUN_DIR/${LABEL}_run.log" 2>&1
+    if grep -q "\[grid\] SUCCESS" "$RUN_DIR/${LABEL}_run.log"; then
+        echo "  -> SUCCESS"
+    else
+        echo "  -> (check $RUN_DIR/${LABEL}_run.log)"
+    fi
 
     echo ""
 done
