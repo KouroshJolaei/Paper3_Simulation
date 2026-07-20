@@ -51,6 +51,13 @@ OBJ_TILT_AXIS = CONFIG["object"].get("tilt_axis", "X")
 #   GRASP_TOOL_OFFSET=<m> -> manual override (dev escape hatch), skips the store.
 # ============================================================
 C_ANCHOR          = 0.1332   # m, pad face below inner-finger link
+
+# The sensor 'Case' prim ORIGIN sits at the pad's END, not its centre. Measured
+# from the pad node cloud: the pad's up-the-rod length is ~41mm and the Case
+# origin is 22.3mm from the pad CENTRE along that axis. Calibration targets the
+# pad CENTRE (what the GUI draws), so it shifts the raw Case offset up by this.
+# Verify once and trim this ONE number if the pad centre is still off by X mm.
+PAD_CENTER_ABOVE_CASE_M = 0.0223   # m, Case origin -> pad centre, along world Z
 CAL_DEFAULT_OFFST = 0.15     # m, provisional offset used ONLY during calibration
 CAL_FILE = os.path.expanduser("~/Paper3_Simulation/Data/pad_offset_calibration.json")
 OBJ_DIAM_MM = float(CONFIG["object"].get("diameter_mm", 0.0))
@@ -1216,6 +1223,33 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
                   "Robotiq_2F_85_adapter_fixed_v_sibling__1_/Robotiq_2F_85_modified/"
                   "Robotiq_2F_85")
     PROBE = (tag == "pt00")
+
+    # ---- find the REAL sensor bodies (the 'Case' rigid prims) ---------------
+    # ".../TSF_85_right/TSF_85" is an EMPTY Xform wrapper -> it never moves.
+    # The actual rigid body is TWO levels deeper (".../TSF_85/TSF_85/Case"),
+    # bolted to the finger. Path depth differs between raw USD and the referenced
+    # stage, so SEARCH for it. THIS is what fills TSF_*_CASE for the calibration.
+    def _find_case_prims():
+        found = {}
+        try:
+            for prim in world.stage.Traverse():
+                pth = str(prim.GetPath())
+                if prim.GetName() != "Case" or "TSF_85" not in pth:
+                    continue
+                if "TSF_85_right" in pth:
+                    found.setdefault("TSF_right_CASE", pth)
+                elif "TSF_85_left" in pth:
+                    found.setdefault("TSF_left_CASE", pth)
+        except Exception as _fe:
+            print(f"[{tag}] case-prim search failed: {_fe}")
+        return found
+
+    _cases = _find_case_prims()
+    if _cases:
+        print(f"[{tag}] sensor Case prims found: {list(_cases.values())}")
+    else:
+        print(f"[{tag}] WARNING: no TSF 'Case' prim found -- pad pose unavailable")
+
     _probe_prims = {
         "right_inner_finger": f"{_GRIP_ROOT}/right_inner_finger",   # s1 pad link
         "left_inner_finger":  f"{_GRIP_ROOT}/left_inner_finger",    # s2 pad link
@@ -1226,12 +1260,13 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
         # OBJECT: bolted with a COMPLIANT PhysX FixedJoint, so a knock makes it
         # lean and STAY leaning. Logging it proves whether the rod moved.
         "object":  "/World/robot_gripper_adapter_sensor/Object_02",
-        # keep the deformable sensor prims too, to compare (may have no xform):
-        "TSF_right": ("/World/robot_gripper_adapter_sensor/"
-                      "robot_gripper_adapter_sensor/TSF_85_right/TSF_85"),
-        "TSF_left":  ("/World/robot_gripper_adapter_sensor/"
-                      "robot_gripper_adapter_sensor/TSF_85_left/TSF_85"),
+        # the OLD (wrong) wrapper prims, kept only to prove they are static:
+        "TSF_right_wrapper": ("/World/robot_gripper_adapter_sensor/"
+                              "robot_gripper_adapter_sensor/TSF_85_right/TSF_85"),
+        "TSF_left_wrapper":  ("/World/robot_gripper_adapter_sensor/"
+                              "robot_gripper_adapter_sensor/TSF_85_left/TSF_85"),
     }
+    _probe_prims.update(_cases)      # <-- the REAL sensor bodies (fills TSF_*_CASE)
     _probe = {}
     if PROBE:
         _probe["open_grip"] = _probe_all(_probe_prims)   # BEFORE closing
@@ -1297,6 +1332,28 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
                 _probe[f"{_nm}_angle_from_world_Z_deg"] = round(_tilt, 4)
         except Exception as _oe:
             _probe["orientation_measure_error"] = str(_oe)
+
+        # ---- LIVE PAD POSE: is the Case live, and the measured EE->pad offset --
+        # THIS writes the TSF_*_CASE_is_live / EE_to_pad fields the calibration
+        # reads. Without it, calibration finds nothing and falls back.
+        try:
+            def _cw(grip, name):
+                v = _probe.get(grip, {}).get(name, {}).get("UsdGeom.XformCache")
+                return np.array(v, dtype=float) if isinstance(v, list) else None
+            _eew = np.array(ee_world, dtype=float)
+            for _side in ("TSF_right_CASE", "TSF_left_CASE"):
+                _op, _cl = _cw("open_grip", _side), _cw("closed_grip", _side)
+                if _cl is None:
+                    _probe[f"{_side}_status"] = "prim not found / no xform"
+                    continue
+                _probe[f"{_side}_closed_world_mm"] = (_cl*1000).round(3).tolist()
+                _probe[f"{_side}_EE_to_pad_mm"]   = ((_cl - _eew)*1000).round(3).tolist()
+                if _op is not None:
+                    _d = (_cl - _op)*1000
+                    _probe[f"{_side}_moved_open_to_closed_mm"] = _d.round(3).tolist()
+                    _probe[f"{_side}_is_live"] = bool(np.max(np.abs(_d)) > 0.5)
+        except Exception as _pe:
+            _probe["ee_to_pad_measure_error"] = str(_pe)
 
         # ---- MEASURED palm clearance + object movement ----------------------
         # Answers two things by measurement instead of estimate:
@@ -1480,31 +1537,74 @@ try:
     print(f"\n[cfg] DONE. {n_ok}/{len(GRID_POINTS)} grasps OK. Data in {OUTPUT_DIR}")
     print(f"[cfg] pose_history.json written ({len(pose_hist)} poses).")
 
-    # ---- CALIBRATE mode: solve this object's TOOL_OFFSET_Z and store it ----
+    # ---- CALIBRATE mode: store the MEASURED live-pad offset ----------------
+    # New method: read the LIVE sensor Case poses (proven live) and store the
+    # real EE->pad offset. The grasp CENTRE is the midpoint of the two pads; its
+    # world offset from the EE is what commanding subtracts. For a symmetric
+    # tool-down grasp the x,y of that midpoint offset are ~0, so the scalar
+    # TOOL_OFFSET_Z = -offset_z drives the grid unchanged -- but now MEASURED,
+    # at a CLEAN (collision-free) grasp, instead of the C_ANCHOR guess.
+    # If the Case is not live (older scene), fall back to the old formula so
+    # calibration never silently fails.
     if CALIBRATE:
         try:
             with open(os.path.join(OUTPUT_DIR, "pad_truth_probe.json")) as _pf:
                 _pt = _json.load(_pf)
-            _ee_z   = float(_pt["ee_world_m"][2])
-            _link_z = float(_pt["closed_grip"]["right_inner_finger"]["UsdGeom.XformCache"][2])
-            _offset = round((_ee_z - _link_z) + C_ANCHOR, 5)
-            _CAL[_diam_key] = {
-                "diameter_mm": OBJ_DIAM_MM,
-                "TOOL_OFFSET_Z": _offset,
-                "ee_z": round(_ee_z, 5),
-                "closed_inner_finger_z": round(_link_z, 5),
-                "C_ANCHOR": C_ANCHOR,
-                "provisional_offset_used": CAL_DEFAULT_OFFST,
-                "close_rad": CLOSE_RAD,
-                "measured_at": _stamp,
-            }
+            _ee = np.array(_pt["ee_world_m"], dtype=float)
+
+            def _case_closed(side):
+                v = _pt.get("closed_grip", {}).get(side, {}).get("UsdGeom.XformCache")
+                return np.array(v, dtype=float) if isinstance(v, list) else None
+            _pr = _case_closed("TSF_right_CASE")
+            _pl = _case_closed("TSF_left_CASE")
+            _live = (_pt.get("TSF_right_CASE_is_live") is True and
+                     _pt.get("TSF_left_CASE_is_live") is True and
+                     _pr is not None and _pl is not None)
+
+            if _live:
+                _pad_mid   = 0.5 * (_pr + _pl)              # grasp centre = CASE ORIGIN (world)
+                _off_world = _pad_mid - _ee                 # EE -> case-origin (world)
+                _off_case  = round(float(-_off_world[2]), 5)               # case origin
+                # shift UP to the pad CENTRE (Case origin is at the pad's end):
+                _offset    = round(_off_case + PAD_CENTER_ABOVE_CASE_M, 5)  # pad CENTRE
+                _CAL[_diam_key] = {
+                    "diameter_mm": OBJ_DIAM_MM,
+                    "method": "measured_live_pad",
+                    "TOOL_OFFSET_Z": _offset,                 # targets pad CENTRE (m)
+                    "TOOL_OFFSET_Z_case_origin": _off_case,   # raw, targets Case origin
+                    "pad_center_above_case_m": PAD_CENTER_ABOVE_CASE_M,
+                    "ee_to_grasp_center_offset_world_m": [round(float(v), 5) for v in _off_world],
+                    "ee_to_pad_right_world_m": [round(float(v), 5) for v in (_pr - _ee)],
+                    "ee_to_pad_left_world_m":  [round(float(v), 5) for v in (_pl - _ee)],
+                    "pad_right_closed_world_m": [round(float(v), 5) for v in _pr],
+                    "pad_left_closed_world_m":  [round(float(v), 5) for v in _pl],
+                    "ee_world_m": [round(float(v), 5) for v in _ee],
+                    "close_rad": CLOSE_RAD,
+                    "finger_joint_rad": _pt.get("finger_joint_rad"),
+                    "measured_at": _stamp,
+                }
+                print(f"\n[cal] CALIBRATED (measured live pad) diameter {OBJ_DIAM_MM} mm")
+                print(f"[cal]   case-origin offset = {_off_case}  + pad-centre shift "
+                      f"{PAD_CENTER_ABOVE_CASE_M} -> TOOL_OFFSET_Z = {_offset}")
+                print(f"[cal]   EE->grasp-centre offset (world mm) = "
+                      f"{(_off_world*1000).round(2).tolist()}")
+                print(f"[cal]   TOOL_OFFSET_Z (scalar, m)          = {_offset}")
+            else:
+                # ---- fallback: old inner-finger + C_ANCHOR formula ----
+                _link_z = float(_pt["closed_grip"]["right_inner_finger"]["UsdGeom.XformCache"][2])
+                _offset = round((float(_ee[2]) - _link_z) + C_ANCHOR, 5)
+                _CAL[_diam_key] = {
+                    "diameter_mm": OBJ_DIAM_MM, "method": "fallback_C_ANCHOR",
+                    "TOOL_OFFSET_Z": _offset, "ee_z": round(float(_ee[2]), 5),
+                    "closed_inner_finger_z": round(_link_z, 5), "C_ANCHOR": C_ANCHOR,
+                    "close_rad": CLOSE_RAD, "measured_at": _stamp,
+                }
+                print(f"\n[cal] Case NOT live -> FALLBACK formula. "
+                      f"diameter {OBJ_DIAM_MM} mm -> TOOL_OFFSET_Z = {_offset}")
+
             os.makedirs(os.path.dirname(CAL_FILE), exist_ok=True)
             with open(CAL_FILE, "w") as _cf:
                 _json.dump(_CAL, _cf, indent=2)
-            print(f"\n[cal] CALIBRATED diameter {OBJ_DIAM_MM} mm -> "
-                  f"TOOL_OFFSET_Z = {_offset}")
-            print(f"[cal] EE_z={_ee_z:.5f}  closed_inner_finger_z={_link_z:.5f}  "
-                  f"C_ANCHOR={C_ANCHOR}")
             print(f"[cal] stored in {CAL_FILE}")
         except Exception as _ce:
             print(f"[cal] CALIBRATION FAILED to compute/store: {_ce}")
