@@ -2,41 +2,42 @@
   "26.0": {
     "diameter_mm": 26.0,
     "method": "measured_live_pad",
-    "TOOL_OFFSET_Z": 0.15671,
+    "TOOL_OFFSET_Z": 0.15651,
     "TOOL_OFFSET_Z_case_origin": 0.13441,
-    "pad_center_above_case_m": 0.0223,
+    "pad_center_above_case_m": 0.0221,
     "ee_to_grasp_center_offset_world_m": [
       -6e-05,
       -1e-05,
       -0.13441
     ],
     "ee_to_pad_right_world_m": [
-      0.03451,
+      0.0345,
       -0.01421,
       -0.13442
     ],
     "ee_to_pad_left_world_m": [
       -0.03463,
       0.01419,
-      -0.13441
+      -0.1344
     ],
     "pad_right_closed_world_m": [
-      -0.23354,
+      -0.23357,
       0.18479,
-      1.1379
+      1.10782
     ],
     "pad_left_closed_world_m": [
-      -0.30267,
-      0.21319,
-      1.13791
+      -0.3027,
+      0.21318,
+      1.10783
     ],
     "ee_world_m": [
-      -0.26805,
-      0.199,
-      1.27232
+      -0.26807,
+      0.19899,
+      1.24223
     ],
     "close_rad": 0.55,
-    "finger_joint_rad": 0.550206184387207,
-    "measured_at": "20260720_151951"
+    "finger_joint_rad": 0.5502074360847473,
+    "tactile_peak_sum": 13201.1,
+    "measured_at": "20260723_170410"
   }
 }

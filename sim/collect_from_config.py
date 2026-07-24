@@ -16,6 +16,11 @@ import sys
 sys.path.insert(0, "/home/kourosh/Paper3_Simulation/curobo-stable/src")
 
 import os, json, argparse
+import csv as _csv
+
+class _CalNoContact(Exception):
+    """Raised to abort a calibrate store when the pads didn't touch the object."""
+    pass
 
 # ============================================================
 # Read the GUI config (all grid points)
@@ -57,7 +62,24 @@ C_ANCHOR          = 0.1332   # m, pad face below inner-finger link
 # origin is 22.3mm from the pad CENTRE along that axis. Calibration targets the
 # pad CENTRE (what the GUI draws), so it shifts the raw Case offset up by this.
 # Verify once and trim this ONE number if the pad centre is still off by X mm.
-PAD_CENTER_ABOVE_CASE_M = 0.0223   # m, Case origin -> pad centre, along world Z
+
+
+# PAD_CENTER_ABOVE_CASE_M = 0.0223   # m, Case origin -> pad centre, along world Z
+# PAD_CENTER_ABOVE_CASE_M = 0.0293
+# PAD_CENTER_ABOVE_CASE_M = 0.0329   # measured via diag9 rim-mask census, 2026-07-22
+#                                    # (was 0.0223 from node cloud -> pad ran 10.6 mm low;
+#                                    #  0.0293 ghost deleted - also wrong by 3.6 mm)
+
+
+PAD_CENTER_ABOVE_CASE_M = 0.0221   # MEASURED from the extension's own mesh log
+                                   # (diag13, 2026-07-23): case origin -> sensing
+                                   # array centre = 22.10 mm. Confirms the original
+                                   # 0.0223. The 0.0329 census inference was wrong.
+
+
+
+
+
 CAL_DEFAULT_OFFST = 0.15     # m, provisional offset used ONLY during calibration
 CAL_FILE = os.path.expanduser("~/Paper3_Simulation/Data/pad_offset_calibration.json")
 OBJ_DIAM_MM = float(CONFIG["object"].get("diameter_mm", 0.0))
@@ -1028,6 +1050,31 @@ def precheck_reachability(grid_points, q_home):
                    "limit_hits": ["ik_failed"]}
         else:
             res = evaluate_reachability(q_seed, q_goal, MANUAL_LIMITS)
+
+
+
+
+            if not res["reachable"]:
+                # direct IK can land a flipped arm branch (e.g. shoulder_lift -3.5 rad)
+                # whose straight-line dry-run crosses a singularity. Before giving up,
+                # retry via the up-then-down path the real run actually uses.
+                up = gw.copy();
+                up[2] += APPROACH_H
+                tr_up = plan_free_move(np.asarray(q_seed, float), world_to_base(up),
+                                       f"{tag}:retry-up")
+                if tr_up is not None:
+                    tr_dn = plan_stitched_z(np.asarray(tr_up[-1], float),
+                                            -float(APPROACH_H), f"{tag}:retry-down")
+                    if tr_dn is not None:
+                        res2 = evaluate_reachability(q_seed,
+                                                     np.asarray(tr_dn[-1], float),
+                                                     MANUAL_LIMITS)
+                        if res2["reachable"]:
+                            q_goal, res = np.asarray(tr_dn[-1], float), res2
+
+
+
+
             if res["reachable"]:
                 q_seed = q_goal          # chain like the real run does
         ok_map[idx] = bool(res["reachable"])
@@ -1185,6 +1232,23 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
         _progress(f"{tag} descent EXEC start ({len(traj_dn)} wpts)")
         run_traj(traj_dn)
         _progress(f"{tag} descent EXEC done")
+        # ---- FINAL TRIM (descent path only): close the residual EE error ----
+        # The stitched descent settles ~1 mm short (settle-loop tolerance).
+        # Measure reached-vs-commanded EE and close the gap with ONE short
+        # stitched line (the same move that lands pad-to-pad at +-0.03 mm).
+        q_now = robot.get_joint_positions()[ai].copy()
+        cpos_t, _ = fk(q_now.astype(np.float32))
+        cur_world = rotmat(ROBOT_WORLD_QUAT_WXYZ) @ cpos_t + ROBOT_WORLD_POS
+        resid = np.asarray(grasp_world, float) - np.asarray(cur_world, float)
+        resid_mm = 1000.0 * float(np.linalg.norm(resid))
+        if resid_mm > 0.2:
+            _progress(f"{tag} descent TRIM start (residual {resid_mm:.2f} mm)")
+            traj_fix = plan_stitched_line(q_now, resid, f"{tag}:trim", n_steps=3)
+            if traj_fix is not None:
+                run_traj(traj_fix)
+                _progress(f"{tag} descent TRIM done")
+            else:
+                _progress(f"{tag} descent TRIM plan failed (keeping residual)")
     q_grasp = robot.get_joint_positions()[ai].copy()
     hold_qg = q_grasp.astype(np.float32)
 
@@ -1265,6 +1329,7 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
                               "robot_gripper_adapter_sensor/TSF_85_right/TSF_85"),
         "TSF_left_wrapper":  ("/World/robot_gripper_adapter_sensor/"
                               "robot_gripper_adapter_sensor/TSF_85_left/TSF_85"),
+
     }
     _probe_prims.update(_cases)      # <-- the REAL sensor bodies (fills TSF_*_CASE)
     _probe = {}
@@ -1379,6 +1444,7 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
                 _probe["rod_top_world_m"] = round(_rod_top_m, 4)
                 _probe["measured_palm_clearance_mm"] = round((_palm_z - _rod_top_m) * 1000, 1)
                 _probe["palm_strikes_rod"] = bool(_palm_z < _rod_top_m)
+
 
             _o_open  = _xyz("open_grip",   "object")
             _o_close = _xyz("closed_grip", "object")
@@ -1552,6 +1618,44 @@ try:
                 _pt = _json.load(_pf)
             _ee = np.array(_pt["ee_world_m"], dtype=float)
 
+            # ---- CONTACT GATE: did the pads actually touch the object? --------
+            # The pad pose reads 'live' even when closing on AIR (the fingers
+            # still swing). The only true contact signal is the tactile sum
+            # rising (the Roberge-paper test). Read the pt00 tactile peak for
+            # BOTH sensors; if neither rises above threshold, REFUSE to store.
+            CONTACT_MIN_SUM = 1000.0   # baseline ~250, real contact ~6000
+            def _tactile_peak(sensor):
+                fn = os.path.join(OUTPUT_DIR, f"{BASENAME}_pt00_{sensor}_tactile_maps.csv")
+                if not os.path.exists(fn):
+                    fn = os.path.join(OUTPUT_DIR, f"{BASENAME}_{sensor}_tactile_maps.csv")
+                if not os.path.exists(fn):
+                    return None
+                peak = 0.0
+                try:
+                    with open(fn) as _tf:
+                        _r = _csv.reader(_tf); next(_r)
+                        for _row in _r:
+                            try:
+                                peak = max(peak, sum(float(x) for x in _row[2:30]))
+                            except Exception:
+                                pass
+                except Exception:
+                    return None
+                return peak
+            _pk1, _pk2 = _tactile_peak("s1"), _tactile_peak("s2")
+            _peak = max([v for v in (_pk1, _pk2) if v is not None] or [0.0])
+            _contact = _peak >= CONTACT_MIN_SUM
+            print(f"[cal] contact check: tactile peak s1={_pk1} s2={_pk2} "
+                  f"-> {'CONTACT' if _contact else 'NO CONTACT'} (thr {CONTACT_MIN_SUM})")
+            if not _contact:
+                print(f"\n[cal] REFUSING TO STORE: the pads did NOT contact the object "
+                      f"(tactile peak {_peak:.0f} < {CONTACT_MIN_SUM:.0f}).")
+                print(f"[cal] The grasp closed on air — move the pad ONTO the rod body "
+                      f"(a Z on the object, not past its end) and calibrate again.")
+                print(f"[cal] Nothing was written; the previous calibration (if any) is kept.")
+                EXIT_CODE = 4
+                raise _CalNoContact()   # skip the store below
+
             def _case_closed(side):
                 v = _pt.get("closed_grip", {}).get(side, {}).get("UsdGeom.XformCache")
                 return np.array(v, dtype=float) if isinstance(v, list) else None
@@ -1581,6 +1685,7 @@ try:
                     "ee_world_m": [round(float(v), 5) for v in _ee],
                     "close_rad": CLOSE_RAD,
                     "finger_joint_rad": _pt.get("finger_joint_rad"),
+                    "tactile_peak_sum": round(float(_peak), 1),
                     "measured_at": _stamp,
                 }
                 print(f"\n[cal] CALIBRATED (measured live pad) diameter {OBJ_DIAM_MM} mm")
@@ -1606,6 +1711,8 @@ try:
             with open(CAL_FILE, "w") as _cf:
                 _json.dump(_CAL, _cf, indent=2)
             print(f"[cal] stored in {CAL_FILE}")
+        except _CalNoContact:
+            pass    # already printed the reason; nothing stored, EXIT_CODE set
         except Exception as _ce:
             print(f"[cal] CALIBRATION FAILED to compute/store: {_ce}")
             EXIT_CODE = 3

@@ -5,28 +5,53 @@
       199.0,
       1052.2
     ],
-    "tilt_deg": 20.0,
+    "tilt_deg": 0.0,
     "tilt_axis": "X",
     "shape": "cylinder",
     "diameter_mm": 26.0,
     "length_mm": 140.0
   },
   "pad": {
-    "base_offset_y_mm": -12.0,
-    "base_offset_z_mm": 70.0,
+    "base_offset_y_mm": 0.0,
+    "base_offset_z_mm": 40.0,
     "x_fixed_centered": true
   },
   "grid": {
-    "nx": 1,
-    "ny": 1,
+    "nx": 2,
+    "ny": 3,
     "step_mm": 8.0,
-    "n_points": 1
+    "n_points": 6
   },
   "points": [
     {
       "index": 0,
-      "pad_offset_y_mm": -12.0,
-      "pad_offset_z_mm": 70.0
+      "pad_offset_y_mm": 0.0,
+      "pad_offset_z_mm": 40.0
+    },
+    {
+      "index": 1,
+      "pad_offset_y_mm": 0.0,
+      "pad_offset_z_mm": 48.0
+    },
+    {
+      "index": 2,
+      "pad_offset_y_mm": 8.0,
+      "pad_offset_z_mm": 40.0
+    },
+    {
+      "index": 3,
+      "pad_offset_y_mm": 8.0,
+      "pad_offset_z_mm": 48.0
+    },
+    {
+      "index": 4,
+      "pad_offset_y_mm": 16.0,
+      "pad_offset_z_mm": 40.0
+    },
+    {
+      "index": 5,
+      "pad_offset_y_mm": 16.0,
+      "pad_offset_z_mm": 48.0
     }
   ]
 }

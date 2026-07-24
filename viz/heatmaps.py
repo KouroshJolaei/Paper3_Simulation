@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 HOLD_FRAC = 0.5      # frames with sum >= 0.5*peak define the hold window
-MIRROR_S2 = True     # show s2 mirrored L-R (the two pads face each other)
+MIRROR_S2 = False     # show s2 mirrored L-R (the two pads face each other)
 
 
 def hold_average(csv_path):
@@ -76,7 +76,8 @@ def plot_run(run_dir):
             # s2 faces the opposite way from s1, so show it MIRRORED L-R
             # (facing-pad view) — display only; the stored data is untouched.
             disp = m[:, ::-1] if (name == "s2" and MIRROR_S2) else m
-            im = ax.imshow(disp, cmap="jet", aspect="auto", vmin=0.0, vmax=vmax)
+            # im = ax.imshow(disp, cmap="jet", aspect="auto", vmin=0.0, vmax=vmax)
+            im = ax.imshow(disp, cmap="jet", aspect="auto", vmin=0.0, vmax=vmax, origin="lower")
             mtag = " [mirrored]" if (name == "s2" and MIRROR_S2) else ""
             ttl = (f"{name}{mtag} — hold-avg of {nfr} frames\npeak sum {peak:.0f}"
                    if ok else f"{name} — FILE MISSING")

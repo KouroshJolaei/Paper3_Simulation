@@ -166,6 +166,12 @@ class CockpitGUI:
             row=r, column=0, columnspan=2, sticky="w"); r += 1
         ttk.Button(frm, text="Save Config", command=self.save_config).grid(
             row=r, column=0, columnspan=2, pady=4, sticky="ew"); r += 1
+        ttk.Button(frm, text="Check Reachability (no motion)",
+                   command=self.save_and_show_reach_cmd).grid(
+            row=r, column=0, columnspan=2, sticky="ew", pady=2); r += 1
+        ttk.Button(frm, text="Load reachability result",
+                   command=self.load_reachability).grid(
+            row=r, column=0, columnspan=2, sticky="ew", pady=2); r += 1
         ttk.Button(frm, text="Save + Show Run Command", command=self.save_and_show_cmd).grid(
             row=r, column=0, columnspan=2, pady=4, sticky="ew"); r += 1
 
@@ -300,23 +306,41 @@ class CockpitGUI:
                 linewidth=2, label=f"cylinder (tilt {cfg['tilt_deg']:.0f}° about {cfg['tilt_axis']})")
         ax.fill(obj[1] + rot[:, 0], obj[2] + rot[:, 1], color="steelblue", alpha=0.35)
         # grid of pad footprints (pad short side across Y, long side up Z)
+        # colour by reachability if a report has been loaded:
+        #   green = reachable, red = unreachable, crimson = not checked yet
+        _rm = getattr(self, "reach_map", None) or {}
+        _lbl_done = {"ok": False, "bad": False, "raw": False}
         for i, (gx, gy) in enumerate(offs):
             py = pad[1] + gy - PAD_W/2
             pz = pad[2] + gx - PAD_H/2   # use X-grid as the up/down (Z) sweep on the face
+            if i in _rm:
+                _ok = bool(_rm[i])
+                col = "#0a9d3a" if _ok else "#d81b1b"
+                key = "ok" if _ok else "bad"
+                lab = ("pad (reachable)" if _ok else "pad (UNREACHABLE)") \
+                      if not _lbl_done[key] else None
+                _lbl_done[key] = True
+                ls = "-" if _ok else "--"
+            else:
+                col, ls = "crimson", "-"
+                lab = "pad" if not _lbl_done["raw"] else None
+                _lbl_done["raw"] = True
             ax.add_patch(mpatches.Rectangle((py, pz), PAD_W, PAD_H, fill=False,
-                                            edgecolor="crimson", linewidth=1.5,
-                                            label="pad" if i == 0 else None))
-            ax.scatter(pad[1]+gy, pad[2]+gx, color="crimson", s=10)
+                                            edgecolor=col, linewidth=1.5,
+                                            linestyle=ls, label=lab))
+            ax.scatter(pad[1]+gy, pad[2]+gx, color=col, s=10)
         # visit path: the exact order the collector executes (pt00 -> last)
         if len(offs) > 1:
             px = [pad[1] + gy for gx, gy in offs]
             pz = [pad[2] + gx for gx, gy in offs]
             ax.plot(px, pz, color="dimgray", linestyle="--", linewidth=1.2,
                     alpha=0.9, zorder=4, label="visit path")
-            ax.scatter(px[0], pz[0], color="green", s=45, zorder=5,
-                       label="pt00 (start = base)")
-            ax.scatter(px[-1], pz[-1], color="red", marker="X", s=45,
-                       zorder=5, label="last pt")
+            # start/last markers are HOLLOW rings so they never hide the
+            # green/red reachability colour of the dot underneath them.
+            ax.scatter(px[0], pz[0], facecolors="none", edgecolors="green",
+                       s=90, linewidths=1.8, zorder=5, label="pt00 (start = base)")
+            ax.scatter(px[-1], pz[-1], facecolors="none", edgecolors="red",
+                       marker="s", s=90, linewidths=1.8, zorder=5, label="last pt")
             if len(offs) <= 24:
                 for i, (x_, z_) in enumerate(zip(px, pz)):
                     ax.annotate(str(i), (x_, z_), textcoords="offset points",
@@ -519,6 +543,86 @@ class CockpitGUI:
         tk.Button(win, text="Copy to clipboard", command=_copy).pack(pady=(4, 10))
         self.status.config(text=f"config saved: {cfg['grid']['n_points']} points.\n"
                                 f"copy the command to run.", foreground="#0a6")
+
+    # ================= Reachability =================
+    def save_and_show_reach_cmd(self):
+        """Dry-run every grid point in Isaac (IK + Paper-2 limit gates). No motion."""
+        cfg = self.save_config()
+        if cfg is None:
+            return
+        headless = "1" if self.vars["headless"].get() else "0"
+        cmd = (
+            f"cd {EXAMPLES_DIR} && \\\n"
+            f'GRASP_OUTPUT_DIR="$HOME/Paper3_Simulation/Data/gui_run" \\\n'
+            f'GRASP_BASENAME="reach" \\\n'
+            f'GRASP_HEADLESS="{headless}" \\\n'
+            f'GRASP_REACH_ONLY="1" \\\n'
+            f"{ISAAC_PY} {COLLECT_PY} \\\n"
+            f"  --config {CONFIG_JSON}"
+        )
+        win = tk.Toplevel(self.root)
+        win.title("Reachability check — copy into a terminal")
+        tk.Label(win, justify="left",
+                 text=("Config saved. This checks EVERY grid point and writes\n"
+                       "reachability_report.json. The robot does NOT move.\n"
+                       "Then press 'Load reachability result' to colour the grid.")
+                 ).pack(anchor="w", padx=10, pady=(10, 4))
+        txt = tk.Text(win, width=82, height=8, wrap="none")
+        txt.insert("1.0", cmd); txt.pack(padx=10, pady=4)
+        def _copy():
+            self.root.clipboard_clear(); self.root.clipboard_append(cmd)
+            self.status.config(text="reachability command copied.", foreground="#0a6")
+        tk.Button(win, text="Copy to clipboard", command=_copy).pack(pady=(4, 10))
+        self.status.config(text="config saved. copy the reachability command.",
+                           foreground="#0a6")
+
+    def _find_reach_report(self):
+        """Newest reachability_report.json: next to the config, else newest run dir."""
+        cands = []
+        side = os.path.join(os.path.dirname(CONFIG_JSON), "reachability_report.json")
+        if os.path.exists(side):
+            cands.append(side)
+        run_root = os.path.join(PROJECT, "Data", "gui_run")
+        if os.path.isdir(run_root):
+            for d in os.listdir(run_root):
+                p = os.path.join(run_root, d, "reachability_report.json")
+                if os.path.exists(p):
+                    cands.append(p)
+        if not cands:
+            return None
+        return max(cands, key=os.path.getmtime)
+
+    def load_reachability(self):
+        """Load the newest report and colour the grid green/red."""
+        path = self._find_reach_report()
+        if path is None:
+            messagebox.showinfo("Reachability",
+                                "No reachability_report.json found yet.\n\n"
+                                "Press 'Check Reachability (no motion)' first and run "
+                                "the command it shows.")
+            return
+        try:
+            with open(path) as f:
+                rep = json.load(f)
+        except Exception as e:
+            messagebox.showerror("Reachability", f"Could not read:\n{path}\n\n{e}")
+            return
+        self.reach_map = {int(p["index"]): bool(p.get("reachable", False))
+                          for p in rep.get("points", [])}
+        n_ok = sum(1 for v in self.reach_map.values() if v)
+        n_all = len(self.reach_map)
+        bad = [f"pt{i:02d}" for i, v in sorted(self.reach_map.items()) if not v]
+        self.refresh()
+        msg = f"{n_ok}/{n_all} points reachable."
+        if bad:
+            reasons = {p["index"]: p.get("reason", "") for p in rep.get("points", [])}
+            detail = "\n".join(f"  pt{i:02d}: {reasons.get(i,'')}"
+                               for i, v in sorted(self.reach_map.items()) if not v)
+            msg += f"\n\nUNREACHABLE (will be skipped):\n{detail}"
+        self.status.config(
+            text=f"reachability: {n_ok}/{n_all} OK" + (f", {len(bad)} skipped" if bad else ""),
+            foreground="#0a6" if not bad else "#c60")
+        messagebox.showinfo("Reachability", f"{msg}\n\nreport:\n{path}")
 
     # ================= Calibrate tab =================
     def _build_calib_tab(self):

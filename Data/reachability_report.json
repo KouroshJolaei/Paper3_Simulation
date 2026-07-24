@@ -1,5 +1,5 @@
 {
-  "generated": "20260720_153431",
+  "generated": "20260723_183658",
   "config": "/home/kourosh/Paper3_Simulation/Data/gui_config.json",
   "object_center_mm": [
     -268.06,
@@ -7,7 +7,7 @@
     1052.2
   ],
   "diameter_mm": 26.0,
-  "TOOL_OFFSET_Z": 0.15671,
+  "TOOL_OFFSET_Z": 0.15651,
   "settings": {
     "max_joint_step": 0.02,
     "max_steps_cap": 500,
@@ -25,37 +25,192 @@
   "points": [
     {
       "index": 0,
-      "pad_offset_y_mm": -12.0,
-      "pad_offset_z_mm": 70.0,
+      "pad_offset_y_mm": 0.0,
+      "pad_offset_z_mm": 40.0,
       "pad_target_world_mm": [
         -268.06,
-        187.0,
-        1122.2
+        199.0,
+        1092.2
       ],
       "ee_target_world_mm": [
         -268.06,
-        187.0,
-        1278.91
+        199.0,
+        1248.71
       ],
       "q_goal_rad": [
-        -0.8437117338180542,
-        -1.8959643840789795,
-        -1.7229554653167725,
-        -1.0950433015823364,
-        1.572434425354004,
-        -0.8437163829803467
+        -0.8562156558036804,
+        -1.9527226686477661,
+        -1.7281485795974731,
+        -1.0315749645233154,
+        1.5707716941833496,
+        -0.8562151193618774
       ],
       "reachable": true,
       "reason": "converged (trajectory dry-run)",
       "limit_hits": [],
-      "iters": 42,
-      "n_steps": 43,
+      "iters": 43,
+      "n_steps": 44,
       "pos_err_final_m": 0.0,
       "rot_err_final_deg": 0.0,
-      "min_sigma": 0.1330647764828775
+      "min_sigma": 0.1317909302655855
+    },
+    {
+      "index": 1,
+      "pad_offset_y_mm": 0.0,
+      "pad_offset_z_mm": 48.0,
+      "pad_target_world_mm": [
+        -268.06,
+        199.0,
+        1100.2
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        199.0,
+        1256.71
+      ],
+      "q_goal_rad": [
+        -0.8561484813690186,
+        -1.9429610967636108,
+        -1.7185364961624146,
+        -1.0509124994277954,
+        1.5706838369369507,
+        -0.8561146259307861
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23738627369009369
+    },
+    {
+      "index": 2,
+      "pad_offset_y_mm": 8.0,
+      "pad_offset_z_mm": 40.0,
+      "pad_target_world_mm": [
+        -268.06,
+        207.0,
+        1092.2
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        207.0,
+        1248.71
+      ],
+      "q_goal_rad": [
+        -0.8648918867111206,
+        -1.9673740863800049,
+        -1.7062199115753174,
+        -1.038838505744934,
+        1.5707855224609375,
+        -0.8648867011070251
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23521980514721993
+    },
+    {
+      "index": 3,
+      "pad_offset_y_mm": 8.0,
+      "pad_offset_z_mm": 48.0,
+      "pad_target_world_mm": [
+        -268.06,
+        207.0,
+        1100.2
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        207.0,
+        1256.71
+      ],
+      "q_goal_rad": [
+        -0.8649172186851501,
+        -1.957903504371643,
+        -1.696684718132019,
+        -1.0578187704086304,
+        1.5709247589111328,
+        -0.8649383187294006
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23845149237630958
+    },
+    {
+      "index": 4,
+      "pad_offset_y_mm": 16.0,
+      "pad_offset_z_mm": 40.0,
+      "pad_target_world_mm": [
+        -268.06,
+        215.0,
+        1092.2
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        215.0,
+        1248.71
+      ],
+      "q_goal_rad": [
+        -0.8734237551689148,
+        -1.9822297096252441,
+        -1.6840739250183105,
+        -1.0460805892944336,
+        1.5707775354385376,
+        -0.8733648061752319
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23469728811661983
+    },
+    {
+      "index": 5,
+      "pad_offset_y_mm": 16.0,
+      "pad_offset_z_mm": 48.0,
+      "pad_target_world_mm": [
+        -268.06,
+        215.0,
+        1100.2
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        215.0,
+        1256.71
+      ],
+      "q_goal_rad": [
+        -0.873414158821106,
+        -1.97288978099823,
+        -1.6745505332946777,
+        -1.0650049448013306,
+        1.5707589387893677,
+        -0.8734073638916016
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23249213596061027
     }
   ],
-  "n_points": 1,
-  "n_reachable": 1,
+  "n_points": 6,
+  "n_reachable": 6,
   "n_unreachable": 0
 }

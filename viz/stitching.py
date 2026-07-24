@@ -51,7 +51,7 @@ PITCH_Z = PAD_H / N_ROWS           # 5.286 mm
 HOLD_FRAC = 0.5                    # hold-average window (project convention)
 OUTLIER_MM = 8.0                   # drop a grasp if recorded pose is >8mm
                                    # off its commanded pose (bad pose record)
-MIRROR_S2_IN_OVERLAY = True        # column 3: show s2 mirrored L-R, since
+MIRROR_S2_IN_OVERLAY = False        # column 3: show s2 mirrored L-R, since
                                    # the two pads face each other (display only)
 BASE_FRAC = 0.05                   # frames with sum <= 5% of peak = baseline
 SUBTRACT_BASELINE = False          # OFF -> single-grasp stitch == raw heatmap
@@ -68,7 +68,7 @@ CAL = {
     # No up-down flip: the array's row order already matches world Z once drawn.
     # (Verify with the 1xN line test; flip here only if contact lands off-object.)
     "s1": {"sign_dy": +1.0, "sign_dz": +1.0, "flip_lr": False, "flip_ud": False},
-    "s2": {"sign_dy": +1.0, "sign_dz": +1.0, "flip_lr": True,  "flip_ud": False},
+    "s2": {"sign_dy": +1.0, "sign_dz": +1.0, "flip_lr": False,  "flip_ud": False},
 }
 
 
@@ -225,8 +225,10 @@ def _reanchor_to_gui(run_dir, offs, verbose=True):
 def _taxel_centers(cal):
     """(7,4,2) array of taxel (y,z) positions in pad-local mm (center = 0).
     Row 0 is drawn at the TOP (+Z), matching imshow of the (7,4) map."""
-    ys = (np.arange(N_COLS) - (N_COLS - 1) / 2.0) * PITCH_Y
-    zs = ((N_ROWS - 1) / 2.0 - np.arange(N_ROWS)) * PITCH_Z
+    # ys = (np.arange(N_COLS) - (N_COLS - 1) / 2.0) * PITCH_Y
+    ys = ((N_COLS - 1) / 2.0 - np.arange(N_COLS)) * PITCH_Y
+    # zs = ((N_ROWS - 1) / 2.0 - np.arange(N_ROWS)) * PITCH_Z
+    zs = (np.arange(N_ROWS) - (N_ROWS - 1) / 2.0) * PITCH_Z  # row 0 = BOTTOM (proven 2026-07-22)
     if cal["flip_lr"]:
         ys = ys[::-1]
     if cal["flip_ud"]:

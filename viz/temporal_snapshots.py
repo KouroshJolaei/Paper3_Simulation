@@ -26,7 +26,7 @@ or run:  python3 temporal_snapshots.py <run_dir>
 import os, sys, glob, json
 import numpy as np
 
-MIRROR_S2 = True  # s2 shown mirrored L-R (pads face each other)
+MIRROR_S2 = False  # s2 shown mirrored L-R (pads face each other)
 import pandas as pd
 
 POST_SECONDS = 3.0   # snapshot #4 : 3 s after squeeze start
@@ -109,7 +109,9 @@ def plot_run(run_dir, out_png=None):
                 _mp = np.array(snaps[key])
                 if sensor == "s2" and MIRROR_S2:
                     _mp = _mp[:, ::-1]
-                ax.imshow(_mp, cmap="jet", aspect="auto")
+                # ax.imshow(_mp, cmap="jet", aspect="auto")
+                ax.imshow(_mp, cmap="jet", aspect="auto", origin="lower")  # plot_run
+
                 if r == 0:
                     ttl = titles[c] + ("" if (key != "post3s" or valid) else "\n(needs 3s hold)")
                     ax.set_title(ttl, fontsize=8)
@@ -158,8 +160,9 @@ def plot_per_grasp(run_dir, results=None):
                 _mp = np.array(snaps[key])
                 if sensor == "s2" and MIRROR_S2:
                     _mp = _mp[:, ::-1]
-                ax.imshow(_mp, cmap="jet", aspect="auto",
-                          vmin=0.0, vmax=vmax)
+                # ax.imshow(_mp, cmap="jet", aspect="auto",
+                #           vmin=0.0, vmax=vmax)
+                ax.imshow(_mp, cmap="jet", aspect="auto", vmin=0.0, vmax=vmax, origin="lower")  # plot_per_grasp
                 ttl = f"{sensor}  {titles[c]}\nsum {meta[key]['sum']:.0f}"
                 if key == "post3s" and not meta["post3s_valid"]:
                     ttl += " (needs 3s hold)"
