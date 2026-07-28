@@ -279,7 +279,8 @@ TOOL_DOWN_ROTVEC      = np.array([2.2214, 2.2214, 0.0])
 
 GRIPPER_RAMP_FRAMES = 60
 WAIT_GRASP_SECONDS  = 1.0
-WAIT_HOLD_SECONDS   = 1.0
+# WAIT_HOLD_SECONDS   = 1.0
+WAIT_HOLD_SECONDS   = 3.5   # >3s so the +3s temporal snapshot lands during the hold, not after release
 N_STEPS             = 10
 CASE13_WEIGHT       = [1.0, 1.0, 1.0, 1.0, 1.0, 0.0]
 

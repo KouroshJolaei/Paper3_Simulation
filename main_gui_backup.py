@@ -71,6 +71,7 @@ class CockpitGUI:
     def __init__(self, root):
         self.root = root
         root.title("Paper 3 — Collection Cockpit (Stage A)")
+        self._show_measured = False   # green 'measured pad' only after Load result
 
         # defaults in mm (from our proven scene)
         self.vars = {
@@ -223,6 +224,28 @@ class CockpitGUI:
         self.tab_collect.columnconfigure(1, weight=1)
         self.tab_collect.rowconfigure(0, weight=1)
 
+    def _cal_entry(self):
+        """Calibration entry for the current diameter, or None."""
+        try:
+            with open(os.path.join(PROJECT, "Data", "pad_offset_calibration.json")) as f:
+                cal = json.load(f)
+            return cal.get(f"{CYL_D:.1f}")
+        except Exception:
+            return None
+
+    def _newest_probe(self):
+        """Newest pad_truth_probe.json (a real measured grasp), or None."""
+        import glob
+        try:
+            cands = glob.glob(os.path.join(PROJECT, "Data", "gui_run", "*",
+                                           "pad_truth_probe.json"))
+            if not cands:
+                return None
+            with open(max(cands, key=os.path.getmtime)) as f:
+                return json.load(f)
+        except Exception:
+            return None
+
     def _read(self):
         def fnum(key, default=0.0):
             try:
@@ -346,6 +369,40 @@ class CockpitGUI:
                     ax.annotate(str(i), (x_, z_), textcoords="offset points",
                                 xytext=(3, 3), fontsize=6, color="dimgray")
         ax.set_aspect("equal", adjustable="datalim")
+
+        # ---------- flange / palm / pad-centre overlay (calibration made visible) --
+        # Shows, at the anchor pad (pt00), where the EE flange and gripper palm sit
+        # above the pad, using the CALIBRATED offset for this diameter. Makes the
+        # ~157mm EE->pad and the palm-vs-rod clearance visible before you run.
+        try:
+            cal = self._cal_entry()
+            if cal is not None:
+                off_mm   = float(cal["TOOL_OFFSET_Z"]) * 1000.0      # pad centre -> EE
+                palm_mm  = 10.79                                     # EE -> palm (measured)
+                anchor_y = pad[1] + offs[0][1]
+                anchor_z = pad[2] + offs[0][0]                       # pad-centre target
+                ee_z     = anchor_z + off_mm
+
+                PALM_HOUSING_DROP_MM = 75.9
+                palm_z = ee_z - 10.79 - PALM_HOUSING_DROP_MM
+
+
+
+                # palm_z   = ee_z - palm_mm
+                rod_top  = obj[2] + CYL_L / 2
+                ax.scatter([anchor_y], [ee_z], marker="v", s=70, color="#333",
+                           zorder=6, label="EE (flange)")
+                ax.scatter([anchor_y], [palm_z], marker="_", s=200, color="#8a6d3b",
+                           zorder=6, label="palm")
+                ax.plot([anchor_y, anchor_y], [palm_z, anchor_z], color="#999",
+                        lw=1, ls=":", zorder=3)
+                clr = palm_z - rod_top
+                ax.annotate(f"EE↕pad {off_mm:.0f}mm\npalm↕rodtop {clr:+.0f}mm",
+                            (anchor_y, ee_z), textcoords="offset points",
+                            xytext=(6, -2), fontsize=6, color="#333")
+        except Exception:
+            pass
+
         ax.legend(fontsize=6, loc="upper right"); ax.grid(alpha=0.3)
 
         # ---------- 3D scene: cylinder + two pads + base + grid (real size) ----------
@@ -677,7 +734,10 @@ class CockpitGUI:
                   font=("", 9, "bold")).grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
         ttk.Button(frm, text="Load calibration result",
                    command=self.show_calibration).grid(
-            row=r, column=0, columnspan=2, sticky="ew", pady=2); r += 1
+            row=r, column=0, sticky="ew", pady=2)
+        ttk.Button(frm, text="Reset view",
+                   command=self.reset_calibration_view).grid(
+            row=r, column=1, sticky="ew", pady=2); r += 1
         self.calib_result = tk.Text(frm, width=34, height=10, wrap="word")
         self.calib_result.grid(row=r, column=0, columnspan=2, sticky="ew", pady=(4, 0)); r += 1
 
@@ -720,6 +780,31 @@ class CockpitGUI:
                      fill=False, edgecolor=pad_color, linewidth=1.8,
                      linestyle="-" if on_body else "--", label="pad (Y centered)"))
         ax.scatter(obj[1], pad_z, color=pad_color, s=12)
+
+        # ---- overlay the MEASURED pad centre from the last real grasp (#2) ----
+        # Only shown AFTER 'Load calibration result' is pressed (self._show_measured),
+        # so opening the GUI shows a clean target-only plot, not a stale run.
+        try:
+            if getattr(self, "_show_measured", False):
+                pr = self._newest_probe()
+                cal = self._cal_entry()
+                if pr and cal and ("TSF_right_CASE_closed_world_mm" in pr):
+                    r = np.array(pr["TSF_right_CASE_closed_world_mm"])
+                    l = np.array(pr["TSF_left_CASE_closed_world_mm"])
+                    case_mid = 0.5 * (r + l)                 # Case origin (mm, world)
+                    shift = float(cal.get("pad_center_above_case_m", 0.0)) * 1000.0
+                    meas_y = case_mid[1]
+                    meas_z = case_mid[2] - shift             # Case origin -> pad centre
+                    ax.add_patch(mpatches.Rectangle((meas_y-PAD_W/2, meas_z-PAD_H/2),
+                                 PAD_W, PAD_H, fill=False, edgecolor="#0a9d3a",
+                                 linewidth=1.6, linestyle="--", label="pad measured"))
+                    ax.scatter(meas_y, meas_z, color="#0a9d3a", s=12)
+                    ax.annotate(f"Δz {meas_z-pad_z:+.1f} mm", (meas_y, meas_z),
+                                textcoords="offset points", xytext=(6, 4),
+                                fontsize=7, color="#0a7d2a")
+        except Exception:
+            pass
+
         ax.set_aspect("equal", adjustable="datalim"); ax.grid(alpha=0.3)
         ax.legend(fontsize=7, loc="upper right")
         self.canvas_calib.draw()
@@ -803,12 +888,54 @@ class CockpitGUI:
                          f"TOOL_OFFSET_Z = {v.get('TOOL_OFFSET_Z')}")
         key = f"{CYL_D:.1f}"
         if key in cal:
-            lines.append(f"\nCurrent object (\u00d8{CYL_D}): "
-                         f"{cal[key]['TOOL_OFFSET_Z']}  [calibrated]")
+            v = cal[key]
+            lines += ["", f"Current object (\u00d8{CYL_D}):  [calibrated]",
+                      f"  TOOL_OFFSET_Z   = {v.get('TOOL_OFFSET_Z')} m",
+                      f"  method          = {v.get('method','?')}"]
+            if "TOOL_OFFSET_Z_case_origin" in v:
+                lines += [f"  case-origin      = {v['TOOL_OFFSET_Z_case_origin']}",
+                          f"  + pad-centre     = {v.get('pad_center_above_case_m')}"]
+            # left/right pad symmetry (from the calibration grasp)
+            try:
+                pr = np.array(v["pad_right_closed_world_m"]) * 1000
+                pl = np.array(v["pad_left_closed_world_m"]) * 1000
+                lines += ["", "Pad symmetry (L vs R):",
+                          f"  Z apart : {abs(pr[2]-pl[2]):.2f} mm  (should be ~0)",
+                          f"  X gap   : {abs(pr[0]-pl[0]):.2f} mm  (pad-origin to origin;"
+                          f" not the contact gap)"]
+            except Exception:
+                pass
+            # landing error from the newest real grasp
+            try:
+                probe = self._newest_probe()
+                if probe and "TSF_right_CASE_closed_world_mm" in probe:
+                    r = np.array(probe["TSF_right_CASE_closed_world_mm"])
+                    l = np.array(probe["TSF_left_CASE_closed_world_mm"])
+                    shift = float(v.get("pad_center_above_case_m", 0.0)) * 1000
+                    meas_z = 0.5*(r[2]+l[2]) - shift
+                    tgt_z = probe.get("gui_target_m", [0,0,0])[2]*1000
+                    lines += ["", "Last grasp landing:",
+                              f"  pad centre Z : {meas_z:.1f} mm",
+                              f"  target Z     : {tgt_z:.1f} mm",
+                              f"  error        : {meas_z-tgt_z:+.1f} mm"]
+            except Exception:
+                pass
         else:
             lines.append(f"\nCurrent object (\u00d8{CYL_D}): NOT calibrated yet")
         self.calib_result.insert("end", "\n".join(lines))
         self.calib_status.config(text="calibration loaded.", foreground="#0a6")
+        self._show_measured = True    # now the green measured pad may draw
+        self.refresh_calib()   # refresh the preview so the measured pad shows
+
+    def reset_calibration_view(self):
+        """Clear the measured overlay + text -> a fresh target-only plot."""
+        self._show_measured = False
+        try:
+            self.calib_result.delete("1.0", "end")
+        except Exception:
+            pass
+        self.calib_status.config(text="view reset - target only.", foreground="#06a")
+        self.refresh_calib()
 
     # ---------- Stage C: read-back heatmaps + pose history ----------
     def _run_dir(self):

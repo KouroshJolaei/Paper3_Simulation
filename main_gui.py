@@ -89,6 +89,7 @@ class CockpitGUI:
             "headless": tk.BooleanVar(value=False),   # False = show Isaac window
             "calib_headless": tk.BooleanVar(value=False),  # Calibrate tab headless toggle
             "calib_dz": tk.StringVar(value="0.0"),  # Calibrate pad Z offset (Y stays centered)
+            "stitch_want_gsr": tk.BooleanVar(value=False),  # Stitch-tab: include GSR in validation
         }
 
         # ---- Notebook: tab 1 = collection cockpit, tab 2 = stitching ----
@@ -1178,6 +1179,25 @@ class CockpitGUI:
                    command=self.do_export_pair).grid(
             row=r, column=0, columnspan=3, sticky="ew", pady=3); r += 1
 
+        # ---- Block 2 validation: stitch round-trip fidelity (SSIM / TC / GSR) ----
+        ttk.Separator(frm, orient="horizontal").grid(
+            row=r, column=0, columnspan=3, sticky="ew", pady=(10, 6)); r += 1
+        ttk.Label(frm, text="VALIDATE stitch fidelity (round-trip)",
+                  font=("", 9, "bold")).grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
+        ttk.Label(frm, justify="left", foreground="#555", wraplength=430, text=(
+            "Re-samples the stitched canvas at each grasp's own taxel positions and\n"
+            "compares recovered-vs-original with SSIM, Tactile-Centroid error, and\n"
+            "GSR. This checks the STITCHER as a container (high SSIM / low TC is\n"
+            "expected, esp. the center grasp) — it is NOT model completion.\n"
+            "GSR needs TensorFlow; it prints 'disabled' and skips if unavailable.")
+                  ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, 4)); r += 1
+        ttk.Checkbutton(frm, text="include GSR (needs TensorFlow + model)",
+                        variable=self.vars["stitch_want_gsr"]).grid(
+            row=r, column=0, columnspan=3, sticky="w"); r += 1
+        ttk.Button(frm, text="Validate Stitch (SSIM / TC / GSR)",
+                   command=self.do_validate).grid(
+            row=r, column=0, columnspan=3, sticky="ew", pady=(4, 3)); r += 1
+
         self.stitch_status = ttk.Label(frm, text="", foreground="#0a6",
                                        wraplength=430, justify="left")
         self.stitch_status.grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0)); r += 1
@@ -1205,6 +1225,23 @@ class CockpitGUI:
                      os.path.join(PROJECT, "sim", "stitching.py")):
             if os.path.exists(cand):
                 spec = importlib.util.spec_from_file_location("stitching", cand)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+        return None
+
+    def _load_validation_module(self):
+        """Load viz/validation.py. It imports stitching.py itself, so make sure
+        the viz/ dir is on sys.path first."""
+        import importlib.util, sys
+        for cand in (os.path.join(PROJECT, "viz", "validation.py"),
+                     os.path.join(PROJECT, "validation.py"),
+                     os.path.join(PROJECT, "sim", "validation.py")):
+            if os.path.exists(cand):
+                d = os.path.dirname(cand)
+                if d not in sys.path:
+                    sys.path.insert(0, d)
+                spec = importlib.util.spec_from_file_location("validation", cand)
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
                 return mod
@@ -1264,6 +1301,58 @@ class CockpitGUI:
         except Exception:
             messagebox.showerror("Stitching",
                 "Export failed:\n\n" + traceback.format_exc())
+
+    def do_validate(self):
+        """Round-trip validate the stitch (SSIM / TC / GSR) and show the report
+        in a scrollable window. Runs in a thread because GSR/TensorFlow can take
+        a few seconds to import the first time."""
+        import traceback, threading
+        run = self._stitch_target_dir()
+        try:
+            res = float(self.vars["stitch_res"].get())
+        except Exception:
+            res = 1.0
+        want_gsr = bool(self.vars["stitch_want_gsr"].get())
+        self.stitch_status.config(
+            text="validating stitch (this can take a few seconds"
+                 + (", loading TensorFlow for GSR…" if want_gsr else "") + ")",
+            foreground="#06a")
+
+        def _worker():
+            try:
+                mod = self._load_validation_module()
+                if mod is None:
+                    self.root.after(0, lambda: messagebox.showerror(
+                        "Validate", "validation.py not found (expected in viz/)."))
+                    return
+                results, report = mod.validate_and_save(run, res, want_gsr=want_gsr)
+                self.root.after(0, lambda: self._show_validation_report(run, report))
+            except Exception:
+                tb = traceback.format_exc()
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Validate", "Validation failed:\n\n" + tb))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_validation_report(self, run, report):
+        win = tk.Toplevel(self.root)
+        win.title("Stitch round-trip validation — " + os.path.basename(run))
+        txt = tk.Text(win, width=78, height=28, wrap="none",
+                      font=("TkFixedFont", 10))
+        txt.insert("1.0", report)
+        txt.configure(state="normal")
+        yscroll = ttk.Scrollbar(win, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=yscroll.set)
+        txt.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=10)
+        yscroll.grid(row=0, column=1, sticky="ns", pady=10)
+        win.columnconfigure(0, weight=1); win.rowconfigure(0, weight=1)
+        def _copy():
+            self.root.clipboard_clear(); self.root.clipboard_append(report)
+        ttk.Button(win, text="Copy report", command=_copy).grid(
+            row=1, column=0, columnspan=2, pady=(0, 10))
+        self.stitch_status.config(
+            text="validation done → saved to " + os.path.basename(run)
+                 + "/Stitched/validation_report.txt", foreground="#0a6")
 
 
 if __name__ == "__main__":
