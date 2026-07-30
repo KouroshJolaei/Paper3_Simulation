@@ -17,6 +17,11 @@ bridge; Stage C the heatmap + pose-history read-back buttons.
 Run in PyCharm:  python3 main_gui.py
 """
 
+# --- FRONT (Y-Z) preview tick spacing, mm. Labelled ticks every MAJOR,
+# --- faint unlabelled gridlines every MINOR. Change these to taste.
+PREVIEW_TICK_MAJOR_MM = 10.0
+PREVIEW_TICK_MINOR_MM = 2.0
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 import numpy as np
@@ -24,6 +29,7 @@ import os, json, subprocess, threading
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.patches as mpatches
+from matplotlib.ticker import MultipleLocator
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
@@ -42,30 +48,57 @@ CALIB_CONFIG_JSON = os.path.join(PROJECT, "Data", "gui_calib_config.json")
 ISAAC_PY  = os.path.expanduser("~/isaacsim/python.sh")
 COLLECT_PY = os.path.join(PROJECT, "sim", "collect_from_config.py")
 EXAMPLES_DIR = os.path.expanduser("~/Paper3_Simulation/TSF-85/examples")
-
-
-def grid_2d(nx, ny, step_mm):
+ 
+def grid_2d(nx, ny, step_mm, centered=False):
     """Return list of (dx, dy) offsets in mm for the grasp grid.
+    dx runs along Z (up/down the face), dy along Y (across it).
 
-    SIGNED / ANCHORED convention:
-      the grid is ANCHORED at the entered pad offset — offset (0,0) is
-      always the FIRST point (pt00). |n| = number of points along that
-      axis; the SIGN picks the direction the grid extends:
+    ANCHORED (centered=False, the original behaviour):
+      offset (0,0) is the FIRST point (pt00) and the grid grows away from
+      it. |n| = number of points on that axis; the SIGN picks direction:
         nx = +3 -> 0, +step, +2*step      nx = -3 -> 0, -step, -2*step
-      (the old centred grid = an anchored grid whose base sits at one edge)
+
+    CENTERED (centered=True):
+      the entered pad offset sits in the MIDDLE and the grid mirrors both
+      ways, so the initial grasp can be extrapolated in every direction.
+      |n| = steps PER SIDE, so an axis holds 2|n|+1 points:
+        nx = 2 -> -2, -1, 0, +1, +2  (5 points)
+      Total points = (2|nx|+1) * (2|ny|+1) — 2,3 gives 35, not 12.
+      Sign is ignored here: a mirrored grid has no direction.
+      pt00 is still (0,0), the CENTRE: the collector starts there, and it
+      is the frame the stitched training pair is anchored on.
     """
     def axis(n):
         n = int(n) if int(n) != 0 else 1
         sgn = 1.0 if n > 0 else -1.0
         return sgn * np.arange(abs(n)) * step_mm
-    xs = axis(nx)
-    ys = axis(ny)
-    pts = []
-    for gy in ys:
-        for gx in xs:
-            pts.append((gx, gy))
-    return pts
 
+    def axis_centered(n):
+        k = abs(int(n))
+        return (np.arange(-k, k + 1) * float(step_mm)) if k else np.zeros(1)
+
+    xs = axis_centered(nx) if centered else axis(nx)
+    ys = axis_centered(ny) if centered else axis(ny)
+    # SERPENTINE (boustrophedon): reverse every other Y-column so the sweep
+    # snakes instead of resetting to the far end of the next column.
+    # Straight raster made the column wrap a hypot(Z_span, step) jump — 22.7 mm
+    # for a 5-row column — and the grasp right after that jump landed ~2.2 mm
+    # short of target in BOTH repeatability runs (A: pt10, B: pt06, the only
+    # two 22.7 mm moves in the run). Short moves land to <0.01 mm.
+    pts = []
+    for j, gy in enumerate(ys):
+        col = xs if (j % 2 == 0) else xs[::-1]
+        for gx in col:
+            pts.append((float(gx), float(gy)))
+    if centered:
+        # Move the centre to the front WITHOUT reordering the rest: raster
+        # order keeps consecutive grasps adjacent, which the pad-to-pad
+        # motion with joint-seed continuity depends on.
+        for i, (gx, gy) in enumerate(pts):
+            if abs(gx) < 1e-9 and abs(gy) < 1e-9:
+                pts.insert(0, pts.pop(i))
+                break
+    return pts
 
 class CockpitGUI:
     def __init__(self, root):
@@ -86,6 +119,8 @@ class CockpitGUI:
             "grid_nx":  tk.StringVar(value="2"),
             "grid_ny":  tk.StringVar(value="3"),
             "grid_step": tk.StringVar(value="8.0"),   # mm
+            # grid mirrors around the entered pad offset instead of starting there
+            "grid_centered": tk.BooleanVar(value=False),
             "headless": tk.BooleanVar(value=False),   # False = show Isaac window
             "calib_headless": tk.BooleanVar(value=False),  # Calibrate tab headless toggle
             "calib_dz": tk.StringVar(value="0.0"),  # Calibrate pad Z offset (Y stays centered)
@@ -158,6 +193,12 @@ class CockpitGUI:
         ttk.Label(frm, text="step (mm)").grid(row=r, column=0, sticky="e")
         e = ttk.Entry(frm, textvariable=self.vars["grid_step"], width=12)
         e.grid(row=r, column=1, sticky="w"); e.bind("<Return>", lambda ev: self.refresh()); r += 1
+        ttk.Checkbutton(frm, text="centered grid (mirror both sides; n = steps PER SIDE)",
+                        variable=self.vars["grid_centered"],
+                        command=self.refresh).grid(
+            row=r, column=0, columnspan=2, sticky="w"); r += 1
+        self.grid_count = ttk.Label(frm, text="", foreground="#555")
+        self.grid_count.grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
 
         ttk.Button(frm, text="Update Preview", command=self.refresh).grid(
             row=r, column=0, columnspan=2, pady=(12, 4), sticky="ew"); r += 1
@@ -273,6 +314,7 @@ class CockpitGUI:
                 "nx": inum("grid_nx"),
                 "ny": inum("grid_ny"),
                 "step": fnum("grid_step", 1.0),
+                "centered": bool(self.vars["grid_centered"].get()),
             }
         except Exception:
             return None
@@ -283,7 +325,20 @@ class CockpitGUI:
             self.info.config(text="check numeric inputs", foreground="red"); return
 
         obj, pad = cfg["obj"], cfg["pad"]
-        offs = grid_2d(cfg["nx"], cfg["ny"], cfg["step"])  # (dx,dy) mm
+        offs = grid_2d(cfg["nx"], cfg["ny"], cfg["step"],
+                       centered=cfg["centered"])            # (dx,dy) mm
+        if hasattr(self, "grid_count"):
+            _j = [float(np.hypot(offs[i+1][0]-offs[i][0],
+                                 offs[i+1][1]-offs[i][1]))
+                  for i in range(len(offs)-1)]
+            _mx = max(_j) if _j else 0.0
+            self.grid_count.config(
+                text=f"{len(offs)} grasp points"
+                     + ("  (centered: n = per side)" if cfg["centered"]
+                        else "  (anchored at pad offset)")
+                     + f"   ~{len(offs) * 2.5:.0f} min"
+                     + f"   max jump {_mx:.1f} mm",
+                foreground=("#b00" if _mx > 15.0 else "#555"))
 
         # ---------- TOP-DOWN (X-Y): two pads squeezing the cylinder along X ----------
         ax = self.ax_top; ax.clear()
@@ -404,7 +459,17 @@ class CockpitGUI:
         except Exception:
             pass
 
-        ax.legend(fontsize=6, loc="upper right"); ax.grid(alpha=0.3)
+        ax.legend(fontsize=6, loc="upper right")
+        # Fine ticks: the grid steps are ~5 mm, so 20/50 mm ticks were far too
+        # coarse to read a pad position off the plot.
+        ax.xaxis.set_major_locator(MultipleLocator(PREVIEW_TICK_MAJOR_MM))
+        ax.yaxis.set_major_locator(MultipleLocator(PREVIEW_TICK_MAJOR_MM))
+        ax.xaxis.set_minor_locator(MultipleLocator(PREVIEW_TICK_MINOR_MM))
+        ax.yaxis.set_minor_locator(MultipleLocator(PREVIEW_TICK_MINOR_MM))
+        ax.tick_params(axis="both", which="major", labelsize=7)
+        ax.tick_params(axis="both", which="minor", length=2)
+        ax.grid(which="major", alpha=0.35, linewidth=0.7)
+        ax.grid(which="minor", alpha=0.15, linewidth=0.4)
 
         # ---------- 3D scene: cylinder + two pads + base + grid (real size) ----------
         ax = self.ax_3d; ax.clear()
@@ -482,7 +547,8 @@ class CockpitGUI:
         cfg = self._read()
         if cfg is None:
             return None
-        offs = grid_2d(cfg["nx"], cfg["ny"], cfg["step"])   # (dx,dy) mm on the face
+        offs = grid_2d(cfg["nx"], cfg["ny"], cfg["step"],
+                       centered=cfg["centered"])   # (dx,dy) mm on the face
         # each grasp point = pad offset from object centre (y,z), plus the base pad offset
         points = []
         for k, (gx, gy) in enumerate(offs):
@@ -507,6 +573,7 @@ class CockpitGUI:
             },
             "grid": {
                 "nx": cfg["nx"], "ny": cfg["ny"], "step_mm": cfg["step"],
+                "centered": cfg["centered"],
                 "n_points": len(points),
             },
             "points": points,
@@ -1353,7 +1420,6 @@ class CockpitGUI:
         self.stitch_status.config(
             text="validation done → saved to " + os.path.basename(run)
                  + "/Stitched/validation_report.txt", foreground="#0a6")
-
 
 if __name__ == "__main__":
     root = tk.Tk()
