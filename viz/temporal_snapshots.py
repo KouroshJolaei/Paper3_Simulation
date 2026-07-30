@@ -31,12 +31,30 @@ import pandas as pd
 
 POST_SECONDS = 3.0   # snapshot #4 : 3 s after squeeze start
 
+# ---- tolerate the tactile-writer race (see stitching._read_tactile_csv) ----
+# Berith's per-frame writer occasionally collides two writes into one line,
+# giving 31 fields instead of 30. One bad frame out of ~325 is irrelevant
+# here, so skip it rather than abort the whole figure.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+try:
+    from stitching import _read_tactile_csv as _read_csv_tolerant
+except Exception:                                    # standalone fallback
+    def _read_csv_tolerant(path):
+        try:
+            return pd.read_csv(path, on_bad_lines="skip")
+        except TypeError:                            # pandas < 1.3
+            return pd.read_csv(path, error_bad_lines=False,
+                               warn_bad_lines=False)
+
+
 
 def extract_snapshots(csv_path):
     """Return (snaps, meta) for one tactile CSV.
     snaps: dict of (7,4) arrays keyed p05/p50/p95/post3s.
     meta:  per-snapshot frame index/time/sum + peak + post3s_valid flag."""
-    df = pd.read_csv(csv_path)
+    df = _read_csv_tolerant(csv_path)
     pred = [c for c in df.columns if c.startswith("pred_")]
     v = df[pred].to_numpy()
     s = v.sum(1)
@@ -99,8 +117,18 @@ def plot_run(run_dir, out_png=None):
         rows = [tg for tg in tags if sensor in results[tg]]
         if not rows:
             continue
-        fig = Figure(figsize=(2.2*4 + 1, 2.0*len(rows) + 1))
+        # ONE colour scale across every grasp and every stage of this
+        # sensor. Per-panel autoscaling made all four squeeze stages look
+        # identical, which is exactly the objection raised on 21 July.
+        vmax = 0.0
+        for tg in rows:
+            for key in labels:
+                vmax = max(vmax, float(np.max(results[tg][sensor]["snapshots"][key])))
+        if vmax <= 0:
+            vmax = 1.0
+        fig = Figure(figsize=(2.2*4 + 1.8, 2.0*len(rows) + 1))
         FigureCanvasAgg(fig)
+        _im = None
         for r, tg in enumerate(rows):
             snaps = results[tg][sensor]["snapshots"]
             valid = results[tg][sensor]["meta"]["post3s_valid"]
@@ -110,7 +138,8 @@ def plot_run(run_dir, out_png=None):
                 if sensor == "s2" and MIRROR_S2:
                     _mp = _mp[:, ::-1]
                 # ax.imshow(_mp, cmap="jet", aspect="auto")
-                ax.imshow(_mp, cmap="jet", aspect="auto", origin="lower")  # plot_run
+                _im = ax.imshow(_mp, cmap="jet", aspect="auto",
+                                origin="lower", vmin=0.0, vmax=vmax)  # plot_run
 
                 if r == 0:
                     ttl = titles[c] + ("" if (key != "post3s" or valid) else "\n(needs 3s hold)")
@@ -118,9 +147,12 @@ def plot_run(run_dir, out_png=None):
                 if c == 0:
                     ax.set_ylabel(tg, fontsize=8)
                 ax.set_xticks([]); ax.set_yticks([])
-        fig.suptitle(f"Temporal snapshots — {sensor}{' [mirrored]' if (sensor=='s2' and MIRROR_S2) else ''} (rows=grasps, cols=squeeze stages)",
+        if _im is not None:
+            cb = fig.colorbar(_im, ax=fig.axes, shrink=0.85)
+            cb.set_label(f"pressure (a.u.) — shared scale, vmax={vmax:.0f}",
+                         fontsize=8)
+        fig.suptitle(f"Temporal snapshots — {sensor}{' [mirrored]' if (sensor=='s2' and MIRROR_S2) else ''} (rows=grasps, cols=squeeze stages; ONE colour scale)",
                      fontsize=11)
-        fig.tight_layout(rect=[0, 0, 1, 0.96])
         png = os.path.join(run_dir, f"temporal_snapshots_{sensor}.png")
         fig.savefig(png, dpi=120, bbox_inches="tight")
         made.append(png)

@@ -23,12 +23,30 @@ import numpy as np
 import pandas as pd
 
 HOLD_FRAC = 0.5      # frames with sum >= 0.5*peak define the hold window
+
+# ---- tolerate the tactile-writer race (see stitching._read_tactile_csv) ----
+# Berith's per-frame writer occasionally collides two writes into one line,
+# giving 31 fields instead of 30. One bad frame out of ~325 is irrelevant
+# here, so skip it rather than abort the whole figure.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+try:
+    from stitching import _read_tactile_csv as _read_csv_tolerant
+except Exception:                                    # standalone fallback
+    def _read_csv_tolerant(path):
+        try:
+            return pd.read_csv(path, on_bad_lines="skip")
+        except TypeError:                            # pandas < 1.3
+            return pd.read_csv(path, error_bad_lines=False,
+                               warn_bad_lines=False)
+
 MIRROR_S2 = False     # show s2 mirrored L-R (the two pads face each other)
 
 
 def hold_average(csv_path):
     """Return (map_7x4, n_hold_frames, peak_sum) for one tactile CSV."""
-    df = pd.read_csv(csv_path)
+    df = _read_csv_tolerant(csv_path)
     pred = [c for c in df.columns if c.startswith("pred_")]
     v = df[pred].to_numpy()
     s = v.sum(1)

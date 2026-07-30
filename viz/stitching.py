@@ -55,6 +55,12 @@ MIRROR_S2_IN_OVERLAY = False        # column 3: show s2 mirrored L-R, since
                                    # the two pads face each other (display only)
 BASE_FRAC = 0.05                   # frames with sum <= 5% of peak = baseline
 SUBTRACT_BASELINE = False          # OFF -> single-grasp stitch == raw heatmap
+
+# Which grasp is the INITIAL (input) frame for column 4 / the training pair.
+#   "first"  = lowest ptNN = where the sweep actually STARTED (honest figure)
+#   "center" = grasp nearest the sweep centroid (Vincent's training convention)
+#   "ptNN"   = pin it explicitly
+INITIAL_GRASP = "first"
                                    #        (flipped to world Z-up), easy to verify.
                                    # ON  -> remove the sensor's fixed background
                                    #        (better for multi-grasp training data).
@@ -72,6 +78,41 @@ CAL = {
 }
 
 
+def _read_tactile_csv(csv_path):
+    """Read a tactile CSV, TOLERATING corrupt lines.
+
+    Berith's per-frame writer occasionally collides two writes into one
+    line (e.g. "101.933339,6116102.816672,6169,..." — frame N's number
+    fused with frame N+1's timestamp), giving a row with 31 fields instead
+    of 30. Seen ~once per run, in s1 both times so far, and it lands in
+    BOTH the per-grasp and the cumulative file.
+
+    One bad frame out of ~325 is irrelevant to a hold-average, so skip it
+    and say so, rather than aborting the whole stitch."""
+    n_bad = 0
+    try:
+        with open(csv_path) as f:
+            n_lines = sum(1 for _ in f) - 1          # minus header
+    except Exception:
+        n_lines = None
+    try:
+        df = pd.read_csv(csv_path, on_bad_lines="skip")
+    except TypeError:                                # pandas < 1.3
+        df = pd.read_csv(csv_path, error_bad_lines=False, warn_bad_lines=False)
+    if n_lines is not None:
+        n_bad = max(0, n_lines - len(df))
+    if n_bad:
+        name = os.path.basename(csv_path)
+        pct = 100.0 * n_bad / max(1, n_lines)
+        print(f"[stitch] WARNING {name}: skipped {n_bad} corrupt line(s) "
+              f"of {n_lines} ({pct:.1f}%) — writer race, see "
+              f"_read_tactile_csv")
+        if pct > 5.0:
+            print(f"[stitch] WARNING {name}: that is a LOT of bad lines; "
+                  f"this grasp's hold-average may not be trustworthy")
+    return df
+
+
 def hold_average(csv_path):
     """(map_7x4, n_hold_frames, peak_sum) for one tactile CSV.
 
@@ -80,7 +121,7 @@ def hold_average(csv_path):
     the fixed sensor pattern visible even with the gripper open. It is
     locked to the pad, so without subtraction stitching smears a copy of
     it across the whole grid and buries the real contact structure."""
-    df = pd.read_csv(csv_path)
+    df = _read_tactile_csv(csv_path)
     pred = [c for c in df.columns if c.startswith("pred_")]
     v = df[pred].to_numpy()
     s = v.sum(1)
@@ -224,7 +265,8 @@ def _reanchor_to_gui(run_dir, offs, verbose=True):
 
 def _taxel_centers(cal):
     """(7,4,2) array of taxel (y,z) positions in pad-local mm (center = 0).
-    Row 0 is drawn at the TOP (+Z), matching imshow of the (7,4) map."""
+    Row 0 is the physical BOTTOM (-Z) of the pad — proven 2026-07-22 by four
+    independent judges (handoff 6.2 3.4). Displays use origin="lower"."""
     # ys = (np.arange(N_COLS) - (N_COLS - 1) / 2.0) * PITCH_Y
     ys = ((N_COLS - 1) / 2.0 - np.arange(N_COLS)) * PITCH_Y
     # zs = ((N_ROWS - 1) / 2.0 - np.arange(N_ROWS)) * PITCH_Z
@@ -235,6 +277,58 @@ def _taxel_centers(cal):
         zs = zs[::-1]
     Y, Z = np.meshgrid(ys, zs)
     return np.stack([Y, Z], axis=-1)
+
+
+def _initial_index(res, which=None):
+    """Index of the grasp treated as the INITIAL (input) frame."""
+    which = which if which is not None else INITIAL_GRASP
+    keys = [g[0] for g in res["grasps"]]
+    if isinstance(which, str) and which in keys:
+        return keys.index(which)
+    if which == "center":
+        return res["center_index"]
+    if which != "first":
+        print(f"[stitch] INITIAL_GRASP={which!r} not in {keys}; using first")
+    nums = []
+    for i, (key, _o, _m) in enumerate(res["grasps"]):
+        try:
+            nums.append((int(str(key)[2:]), i))
+        except ValueError:
+            nums.append((10**6 + i, i))
+    return min(nums)[1]
+
+
+def _composite_extended(res, which=None):
+    """INITIAL-frame composite: the chosen grasp's own map inside its pad
+    footprint, the stitched extension everywhere outside it.
+
+    Reuses res["paint"] so it lands on the SAME grid as res["canvas"] — no
+    new geometry, so it cannot drift from the real paint step.
+
+    Returns (composite, (oy, oz), key, ext_mm) where ext_mm says how far the
+    canvas reaches BEYOND each edge of the initial pad frame:
+        {"up":, "down":, "left":, "right":}  in mm.
+    Measured PER SIDE, never assumed symmetric: a sweep that only climbed in
+    Z extends up and not down, and the figure must show exactly that."""
+    i = _initial_index(res, which)
+    inp, icnt, _sq = res["paint"]([i])
+    composite = np.where(icnt > 0, inp, res["canvas"])
+    key, (oy, oz), _m = res["grasps"][i]
+    # SELF-CHECK: outside the initial pad footprint the composite must BE the
+    # stitched canvas (column 1), cell for cell. If this ever prints False the
+    # two columns really have diverged and nothing below should be trusted.
+    _out = icnt <= 0
+    print(f"[stitch] composite {key}: interior {int((icnt > 0).sum())} cells "
+          f"(raw, max {float(inp.max()):.0f}) | exterior {int(_out.sum())} "
+          f"cells (stitch, max {float(res['canvas'].max()):.0f}) | exterior "
+          f"identical to column 1: "
+          f"{bool(np.array_equal(composite[_out], res['canvas'][_out]))}")
+    y0, y1, z0, z1 = res["extent"]
+    ext_mm = {"left":  (oy - PAD_W / 2.0) - y0,
+              "right": y1 - (oy + PAD_W / 2.0),
+              "down":  (oz - PAD_H / 2.0) - z0,
+              "up":    z1 - (oz + PAD_H / 2.0)}
+    return composite, (float(oy), float(oz)), key, ext_mm
 
 
 def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True):
@@ -313,29 +407,34 @@ def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True):
     nz = int(np.ceil(2 * half_z / res_mm))
     y0, z0 = cy - half_y, cz - half_z                        # origin (mm)
 
-    # each taxel paints a FIXED-SIZE block (its true footprint in cells),
-    # anchored at its centre. This preserves the 7x4 pattern exactly at any
-    # resolution — neighbours never merge or split (the old edge-rounding did,
-    # which mangled the map at coarse res like 5 mm/cell).
-    _bw = max(1, int(round(PITCH_Y / res_mm)))     # taxel block width  (cells)
-    _bh = max(1, int(round(PITCH_Z / res_mm)))     # taxel block height (cells)
+    # Every canvas cell is assigned to the taxel whose centre is NEAREST.
+    # On a regular lattice that is the taxel's true footprint (a Voronoi
+    # cell), so the pad tiles EXACTLY: no gap between taxels, no overlap,
+    # and the painted region is exactly PAD_W x PAD_H.
+    #
+    # The previous fixed-block splat used round(PITCH/res) cells. At
+    # 0.75 mm/cell that is round(5.5/0.75) = 7 cells = 5.25 mm against a
+    # 5.5 mm pitch, which left an unpainted gap column between taxels c2
+    # and c3 and made the painted pad 21.0 mm wide instead of 22.0 — so
+    # the drawn pad rectangle no longer matched the raw interior.
+    _cell_y = y0 + np.arange(ny) * res_mm          # cell centres (mm, world)
+    _cell_z = z0 + np.arange(nz) * res_mm
+    _uy = tax[0, :, 0]          # 4 column centres, pad-local (CAL already applied)
+    _uz = tax[:, 0, 1]          # 7 row centres,    pad-local
 
     def _splat_one(oy, oz, m, acc, cnt, sq):
-        for r in range(N_ROWS):
-            for c in range(N_COLS):
-                ty = oy + tax[r, c, 0]
-                tz = oz + tax[r, c, 1]
-                # cell containing the taxel centre, then a fixed block around it
-                icy = int(round((ty - y0) / res_mm))
-                icz = int(round((tz - z0) / res_mm))
-                iy0 = icy - _bw // 2; iy1 = iy0 + _bw
-                iz0 = icz - _bh // 2; iz1 = iz0 + _bh
-                iy0, iy1 = max(iy0, 0), min(iy1, ny)
-                iz0, iz1 = max(iz0, 0), min(iz1, nz)
-                if iy1 > iy0 and iz1 > iz0:
-                    acc[iz0:iz1, iy0:iy1] += m[r, c]
-                    cnt[iz0:iz1, iy0:iy1] += 1.0
-                    sq[iz0:iz1, iy0:iy1] += m[r, c] * m[r, c]
+        ly = _cell_y - oy                          # pad-local mm
+        lz = _cell_z - oz
+        sy = np.where(np.abs(ly) <= PAD_W / 2.0)[0]
+        sz = np.where(np.abs(lz) <= PAD_H / 2.0)[0]
+        if sy.size == 0 or sz.size == 0:
+            return
+        ci = np.argmin(np.abs(ly[sy][None, :] - _uy[:, None]), axis=0)
+        ri = np.argmin(np.abs(lz[sz][None, :] - _uz[:, None]), axis=0)
+        sub = m[np.ix_(ri, ci)]
+        acc[np.ix_(sz, sy)] += sub
+        cnt[np.ix_(sz, sy)] += 1.0
+        sq[np.ix_(sz, sy)] += sub * sub
 
     def paint(indices):
         """(canvas, count, sumsq) for the given grasps, on the same grid."""
@@ -441,7 +540,73 @@ def _load_scene(run_dir, verbose=True):
     return None
 
 
+class _Tee:
+    """Mirror stdout so a run's diagnostics reach BOTH the terminal and disk.
+    Needed because the GUI launches stitching in a thread whose stdout the
+    user usually never sees (and never at all when running headless)."""
+
+    def __init__(self, stream):
+        self._s = stream
+        self.buf = []
+
+    def write(self, txt):
+        try:
+            self._s.write(txt)
+        except Exception:
+            pass
+        self.buf.append(txt)
+        return len(txt)
+
+    def flush(self):
+        try:
+            self._s.flush()
+        except Exception:
+            pass
+
+    def isatty(self):
+        return False
+
+
 def stitch_run(run_dir, res_mm=1.0):
+    """Build + save the stitched maps for s1 and s2, and write every
+    diagnostic line to <run_dir>/Stitched/stitch_report.txt.
+
+    Returns the list of saved PNG paths (PNGs ONLY — the GUI imread()s
+    whatever this returns, so the .txt must never appear in it)."""
+    import time
+    tee = _Tee(sys.stdout)
+    old = sys.stdout
+    sys.stdout = tee
+    try:
+        made = _stitch_run_body(run_dir, res_mm)
+    finally:
+        sys.stdout = old            # restore even if the body raised
+
+    hdr = ["STITCH REPORT",
+           f"written   : {time.strftime('%Y-%m-%d %H:%M:%S')}",
+           f"run_dir   : {os.path.abspath(run_dir)}",
+           f"res_mm    : {res_mm}",
+           f"settings  : INITIAL_GRASP={INITIAL_GRASP!r}  "
+           f"SUBTRACT_BASELINE={SUBTRACT_BASELINE}  "
+           f"MIRROR_S2_IN_OVERLAY={MIRROR_S2_IN_OVERLAY}  "
+           f"OUTLIER_MM={OUTLIER_MM}",
+           f"pad/pitch : PAD_W={PAD_W} PAD_H={PAD_H} "
+           f"PITCH_Y={PITCH_Y} PITCH_Z={PITCH_Z}",
+           "-" * 68, ""]
+    body = "".join(tee.buf).rstrip()
+    out_dir = os.path.join(run_dir, "Stitched")
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        rpt = os.path.join(out_dir, "stitch_report.txt")
+        with open(rpt, "w") as f:
+            f.write("\n".join(hdr) + body + "\n")
+        print(f"saved {rpt}")
+    except Exception as e:
+        print(f"[stitch] could not write stitch_report.txt ({e})")
+    return made
+
+
+def _stitch_run_body(run_dir, res_mm=1.0):
     """Build + save the stitched maps for s1 and s2.
     Returns the list of saved PNG paths (may be empty)."""
     from matplotlib.figure import Figure
@@ -468,14 +633,19 @@ def stitch_run(run_dir, res_mm=1.0):
         gui = _load_gui_grid(run_dir)
         scene = _load_scene(run_dir, verbose=False)
         show_overlay = gui is not None
-        ncols = 3 if show_overlay else 2
+        ncols = 4 if show_overlay else 3   # last column = initial + extended
 
         fig = Figure(figsize=(5.2 * ncols + 0.3, 4.6))
         FigureCanvasAgg(fig)
         ax1 = fig.add_subplot(1, ncols, 1)
         ax2 = fig.add_subplot(1, ncols, 2)
+        # ONE shared colour range for column 1 and the last column, so the
+        # region outside the initial frame is directly comparable between them.
+        v_lo, v_hi = float(np.min(canvas)), float(np.max(canvas))
+        if not np.isfinite(v_hi) or v_hi <= v_lo:
+            v_lo, v_hi = 0.0, 1.0
         im1 = ax1.imshow(canvas, cmap="jet", origin="lower",
-                         extent=ext, aspect="equal")
+                         extent=ext, aspect="equal", vmin=v_lo, vmax=v_hi)
         ax1.set_title(f"{sensor} — stitched extended map "
                       f"({len(res['grasps'])} grasps, hold-avg)", fontsize=10)
         ax1.set_xlabel("Y (mm)"); ax1.set_ylabel("Z (mm)")
@@ -567,6 +737,37 @@ def stitch_run(run_dir, res_mm=1.0):
             print("[stitch] NO overlay column: could not read commanded grid "
                   "from config (need gui_config with object + points).")
 
+        # ---- LAST column: INITIAL contact frame + stitched extension -------
+        comp, (c_oy, c_oz), c_key, exd = _composite_extended(res)
+        ax4 = fig.add_subplot(1, ncols, ncols)
+        im4 = ax4.imshow(comp, cmap="jet", origin="lower",
+                         extent=ext, aspect="equal", vmin=v_lo, vmax=v_hi)
+        ry0, ry1 = c_oy - PAD_W / 2.0, c_oy + PAD_W / 2.0
+        rz0, rz1 = c_oz - PAD_H / 2.0, c_oz + PAD_H / 2.0
+        rY = [ry0, ry1, ry1, ry0, ry0]
+        rZ = [rz0, rz0, rz1, rz1, rz0]
+        ax4.plot(rY, rZ, color="k", lw=3.2, alpha=0.75)        # contrast underlay
+        ax4.plot(rY, rZ, "w--", lw=1.6,
+                 label=f"initial pad frame ({c_key})")
+        ax4.scatter([c_oy], [c_oz], s=18, color="w",
+                    edgecolor="k", linewidth=0.6, zorder=6)
+        ax4.set_title(
+            f"initial contact ({c_key}) + extended map\n"
+            f"extends  up {exd['up']:.1f} / down {exd['down']:.1f} / "
+            f"left {exd['left']:.1f} / right {exd['right']:.1f}  mm\n"
+            f"colour scale shared with col 1 (raw interior may saturate)",
+            fontsize=9)
+        ax4.set_xlabel("Y (mm)")
+        ax4.legend(fontsize=6, loc="upper right")
+        fig.colorbar(im4, ax=ax4, shrink=0.85).set_label("pressure (a.u.)",
+                                                         fontsize=8)
+        print(f"[stitch {sensor}] initial frame = {c_key} (INITIAL_GRASP="
+              f"{INITIAL_GRASP!r}); extension mm  "
+              f"up={exd['up']:.1f} down={exd['down']:.1f} "
+              f"left={exd['left']:.1f} right={exd['right']:.1f}  |  taxels  "
+              f"up={exd['up']/PITCH_Z:.2f} down={exd['down']/PITCH_Z:.2f} "
+              f"left={exd['left']/PITCH_Y:.2f} right={exd['right']/PITCH_Y:.2f}")
+
         fig.suptitle(f"BLOCK 2 — stitched contact map [{sensor}]   "
                      f"(offsets: {res['offset_source']}, {res_mm} mm/cell, "
                      f"overlap sigma={res['overlap_std']:.0f})",
@@ -594,6 +795,16 @@ def export_pair(run_dir, res_mm=1.0):
         out[f"input_mask_{sensor}"] = icnt > 0
         out[f"target_{sensor}"] = res["canvas"]
         out[f"target_mask_{sensor}"] = res["count"] > 0
+        # second TARGET variant: raw initial grasp inside its own pad frame,
+        # stitch outside. Kept ALONGSIDE the full-stitch target so the choice
+        # can be made at training time (Block 3), not now.
+        comp, (c_oy, c_oz), c_key, exd = _composite_extended(res)
+        out[f"target_composite_{sensor}"] = comp
+        meta[f"initial_{sensor}"] = c_key
+        meta[f"initial_mode_{sensor}"] = INITIAL_GRASP
+        meta[f"frame_rect_{sensor}"] = [c_oy - PAD_W / 2.0, c_oy + PAD_W / 2.0,
+                                        c_oz - PAD_H / 2.0, c_oz + PAD_H / 2.0]
+        meta[f"extension_mm_{sensor}"] = exd
         meta[f"center_{sensor}"] = res["center_key"]
         meta[f"extent_{sensor}"] = list(res["extent"])
         meta[f"n_grasps_{sensor}"] = len(res["grasps"])

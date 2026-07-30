@@ -24,8 +24,10 @@ in Block 4, once the model exists. Keep these two uses separate when talking
 to supervisors.
 
 DEPENDS ON stitching.py — it reuses that module's own geometry
-(_taxel_centers, load_offsets, _reanchor_to_gui, hold_average, CAL, pitches)
-so the round-trip can never drift from the real paint step.
+(_taxel_centers, load_offsets, _reanchor_to_gui, hold_average, CAL, pitches,
+PAD_W/PAD_H) so the round-trip can never drift from the real paint step.
+_sample_canvas inverts the NEAREST-TAXEL (Voronoi) splat introduced
+2026-07-29; if stitching's paint rule changes again, this must follow.
 
 GSR: ported from get_gsr.py — model CNN_conv2d_norm3000_full.h5, input
 resized to 9x9, divided by 3000. It is OPTIONAL: if TensorFlow or the model
@@ -145,27 +147,55 @@ def ssim(a, b):
 
 # ------------------------------------------------ round-trip sampler ----
 def _sample_canvas(canvas, extent, res_mm, oy, oz, tax):
-    """Recover a 7x4 by reading the canvas back at each taxel's world
-    position, using the SAME block footprint the stitcher painted with
-    (_bw x _bh cells, round-to-cell) — so a no-overlap grasp round-trips
-    to itself exactly."""
+    """Recover a 7x4 by averaging the canvas over each taxel's footprint.
+
+    This is the EXACT inverse of stitching._splat_one: a canvas cell belongs
+    to the taxel whose centre is nearest (Voronoi on the taxel lattice),
+    masked to |y| <= PAD_W/2 and |z| <= PAD_H/2. So a no-overlap grasp
+    round-trips to itself exactly.
+
+    (Until 2026-07-29 this used a fixed bw x bh block, matching the old
+    fixed-block splat. That splat left a gap column at 0.75 mm/cell and a
+    footprint 1.0 mm narrower than the pad; both sides were replaced.)"""
     y0, y1, z0, z1 = extent
     nz, ny = canvas.shape
-    bw = max(1, int(round(ST.PITCH_Y / res_mm)))
-    bh = max(1, int(round(ST.PITCH_Z / res_mm)))
     out = np.zeros((ST.N_ROWS, ST.N_COLS))
+    ly = (y0 + np.arange(ny) * res_mm) - oy        # pad-local mm
+    lz = (z0 + np.arange(nz) * res_mm) - oz
+    sy = np.where(np.abs(ly) <= ST.PAD_W / 2.0)[0]
+    sz = np.where(np.abs(lz) <= ST.PAD_H / 2.0)[0]
+    if sy.size == 0 or sz.size == 0:
+        return out
+    uy = tax[0, :, 0]          # 4 column centres, pad-local (CAL applied)
+    uz = tax[:, 0, 1]          # 7 row centres,    pad-local
+    ci = np.argmin(np.abs(ly[sy][None, :] - uy[:, None]), axis=0)
+    ri = np.argmin(np.abs(lz[sz][None, :] - uz[:, None]), axis=0)
+    sub = canvas[np.ix_(sz, sy)]
     for r in range(ST.N_ROWS):
+        rr = np.where(ri == r)[0]
+        if rr.size == 0:
+            continue
         for c in range(ST.N_COLS):
-            ty = oy + tax[r, c, 0]
-            tz = oz + tax[r, c, 1]
-            icy = int(round((ty - y0) / res_mm))
-            icz = int(round((tz - z0) / res_mm))
-            iy0 = max(icy - bw // 2, 0); iy1 = min(iy0 + bw, ny)
-            iz0 = max(icz - bh // 2, 0); iz1 = min(iz0 + bh, nz)
-            if iy1 > iy0 and iz1 > iz0:
-                block = canvas[iz0:iz1, iy0:iy1]
-                out[r, c] = float(block.mean())
+            cc = np.where(ci == c)[0]
+            if cc.size:
+                out[r, c] = float(sub[np.ix_(rr, cc)].mean())
     return out
+
+
+def _footprint_coverage(count, extent, res_mm, oy, oz):
+    """Mean number of grasps painting this grasp's own pad footprint.
+    1.0 = nothing else overlaps it (round-trip should be exact); higher
+    means the recovered map is an average of that many grasps, so SSIM
+    below 1 is expected and NOT a stitcher fault."""
+    y0, y1, z0, z1 = extent
+    nz, ny = count.shape
+    ly = (y0 + np.arange(ny) * res_mm) - oy
+    lz = (z0 + np.arange(nz) * res_mm) - oz
+    sy = np.where(np.abs(ly) <= ST.PAD_W / 2.0)[0]
+    sz = np.where(np.abs(lz) <= ST.PAD_H / 2.0)[0]
+    if sy.size == 0 or sz.size == 0:
+        return 0.0
+    return float(np.mean(count[np.ix_(sz, sy)]))
 
 
 def validate_run(run_dir, res_mm=1.0, want_gsr=True):
@@ -194,7 +224,9 @@ def validate_run(run_dir, res_mm=1.0, want_gsr=True):
             rows.append({"grasp": key,
                          "is_center": (i == res["center_index"]),
                          "ssim": ssim(orig, recov),
-                         "tc_err_mm": tc_error_mm(orig, recov)})
+                         "tc_err_mm": tc_error_mm(orig, recov),
+                         "coverage": _footprint_coverage(
+                             res["count"], extent, res_mm, oy, oz)})
         ssims = [r["ssim"] for r in rows if r["ssim"] is not None]
         tcs = [r["tc_err_mm"] for r in rows if r["tc_err_mm"] is not None]
         results["sensors"][sensor] = {
@@ -234,11 +266,12 @@ def format_report(results):
             L.append(f"  {sensor}: {blk['error']}")
             continue
         rows, s = blk["rows"], blk["summary"]
-        L.append(f"  {sensor}:  grasp     SSIM    TC_err(mm)")
+        L.append(f"  {sensor}:  grasp     SSIM    TC_err(mm)   overlap(x)")
         for r in rows:
             tag = "*" if r["is_center"] else " "
             tc = r["tc_err_mm"] if r["tc_err_mm"] is not None else -1
-            L.append(f"     {tag}{r['grasp']}    {r['ssim']:.3f}     {tc:5.2f}")
+            L.append(f"     {tag}{r['grasp']}    {r['ssim']:.3f}     {tc:5.2f}"
+                     f"       {r.get('coverage', 0.0):5.1f}")
         L.append(f"     SUMMARY  SSIM={s['ssim_mean']:.3f}   "
                  f"TC_err={s['tc_err_mean_mm']:.2f} mm   "
                  f"(overlap sigma={s['overlap_sigma']:.0f})")
@@ -257,9 +290,25 @@ def format_report(results):
         if gsr["gsr_err_mean"] is not None:
             L.append(f"     SUMMARY  mean GSR_err = {gsr['gsr_err_mean']:.2f} "
                      f"percentage points")
+            _vals = [r["gsr_orig"] for r in gsr["rows"]
+                     if r["gsr_orig"] is not None]
+            if _vals and (max(_vals) - min(_vals)) < 1e-6:
+                L.append(f"     !! GSR IS SATURATED at {_vals[0]:.2f}% for "
+                         f"every grasp — zero dynamic range, so GSR_err=0")
+                L.append(f"     !! carries NO information here. Do not quote "
+                         f"it as validation. It only")
+                L.append(f"     !! becomes meaningful on grasps that are not "
+                         f"all trivially successful.")
 
     L.append("")
-    L.append("* = center grasp (its INPUT is itself; SSIM should be ~1.0)")
+    L.append("* = centre grasp.  overlap(x) = mean grasps painting that "
+             "grasp's own footprint.")
+    L.append("  SSIM ~1.0 is expected ONLY at overlap ~1.0 (an isolated "
+             "grasp). Where overlap is high the")
+    L.append("  recovered map is an average of that many DIFFERENT maps, so "
+             "SSIM < 1 measures how much")
+    L.append("  the grasps disagree — the same quantity as overlap sigma, "
+             "not a stitcher defect.")
     return "\n".join(L)
 
 
