@@ -15,3 +15,5 @@ TSF-85/
 # Data folder: Ignore everything, but keep JSON configs
 Data/
 !Data/*.json
+__pycache__/
+*.pyc
