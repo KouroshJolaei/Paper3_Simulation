@@ -22,7 +22,10 @@ import os, sys, glob
 import numpy as np
 import pandas as pd
 
-HOLD_FRAC = 0.5      # frames with sum >= 0.5*peak define the hold window
+HOLD_FRAC = 0.9      # FALLBACK ONLY — hold_average() below delegates to
+                     # stitching.hold_average whenever stitching imports.
+                     # Kept in step with stitching.HOLD_FRAC so the fallback
+                     # cannot silently disagree with the real pipeline.
 
 # ---- tolerate the tactile-writer race (see stitching._read_tactile_csv) ----
 # Berith's per-frame writer occasionally collides two writes into one line,
@@ -31,9 +34,16 @@ HOLD_FRAC = 0.5      # frames with sum >= 0.5*peak define the hold window
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
+# hold_average is imported from stitching too: keeping a second copy here
+# meant heatmaps and stitches could silently disagree (this file used
+# 0.5*peak as the hold threshold, stitching uses min + 0.5*range, and only
+# stitching knew about baseline subtraction).
 try:
     from stitching import _read_tactile_csv as _read_csv_tolerant
+    from stitching import hold_average as _hold_average_shared
 except Exception:                                    # standalone fallback
+    _hold_average_shared = None
+
     def _read_csv_tolerant(path):
         try:
             return pd.read_csv(path, on_bad_lines="skip")
@@ -45,7 +55,13 @@ MIRROR_S2 = False     # show s2 mirrored L-R (the two pads face each other)
 
 
 def hold_average(csv_path):
-    """Return (map_7x4, n_hold_frames, peak_sum) for one tactile CSV."""
+    """Return (map_7x4, n_hold_frames, peak_sum) for one tactile CSV.
+
+    Delegates to stitching.hold_average so the heatmap you look at is
+    EXACTLY the map that gets stitched — same hold window, same baseline
+    handling. The local version below is only a standalone fallback."""
+    if _hold_average_shared is not None:
+        return _hold_average_shared(csv_path)
     df = _read_csv_tolerant(csv_path)
     pred = [c for c in df.columns if c.startswith("pred_")]
     v = df[pred].to_numpy()
@@ -109,6 +125,13 @@ def plot_run(run_dir):
         fig.savefig(png, dpi=120, bbox_inches="tight")
         made.append(png)
         print(f"saved {png}")
+
+    # the 28 numbers behind every figure above, in one CSV
+    try:
+        from stitching import save_hold_averages
+        save_hold_averages(run_dir)
+    except Exception as e:
+        print(f"[maps] could not save hold_average_maps.csv ({e})")
     return made
 
 

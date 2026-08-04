@@ -121,7 +121,32 @@ else:
 
 
 APPROACH_H    = 0.10
-CLOSE_RAD     = 0.55
+
+# CLOSE_RAD is the finger-joint angle we squeeze to. It is DIAMETER
+# DEPENDENT: 0.55 rad closes to ~26 mm, so on a 50 mm object the pads would
+# never meet it and on a 13 mm one they would crush it.
+#
+# The calibration store already RECORDS close_rad per diameter (it is written
+# at the end of a calibrate run) -- it was simply never read back. Now it is,
+# with the same discipline as TOOL_OFFSET_Z: use the stored value, or fall
+# back to the anchored 26 mm value only while CALIBRATING a new diameter.
+#   GRASP_CLOSE_RAD=<rad>  -> manual override (needed for the FIRST grasp on
+#                             a new diameter, before anything is stored).
+CLOSE_RAD_DEFAULT = 0.55                     # the verified 26 mm value
+if os.environ.get("GRASP_CLOSE_RAD"):
+    CLOSE_RAD = float(os.environ["GRASP_CLOSE_RAD"])
+    print(f"[cal] MANUAL override CLOSE_RAD = {CLOSE_RAD:.4f} rad")
+elif _diam_key in _CAL and "close_rad" in _CAL[_diam_key]:
+    CLOSE_RAD = float(_CAL[_diam_key]["close_rad"])
+    print(f"[cal] using calibrated CLOSE_RAD = {CLOSE_RAD:.4f} rad "
+          f"for {OBJ_DIAM_MM} mm")
+else:
+    CLOSE_RAD = CLOSE_RAD_DEFAULT
+    if abs(OBJ_DIAM_MM - 26.0) > 0.5:
+        print(f"[cal] WARNING: no stored close_rad for {OBJ_DIAM_MM} mm; "
+              f"using the 26 mm value {CLOSE_RAD:.4f} rad. Estimate for this "
+              f"diameter: {max(0.05, (85.0 - OBJ_DIAM_MM) / 106.0):.3f} rad "
+              f"(set GRASP_CLOSE_RAD to use it).")
 
 # ---- PROBLEM 1: stop lifting APPROACH_H between neighbouring grid points ----
 # Old behaviour (Berith's single-grasp routine, copied per point): for EVERY
@@ -325,6 +350,50 @@ world.scene.add_default_ground_plane()
 add_reference_to_stage(usd_path=USD_PATH, prim_path=ROBOT_PRIM_PATH)
 stage = world.stage
 
+# ============================================================
+# OBJECT SIZE — set from the config, no separate scene file per object.
+#
+# /World/.../Object_02/Cylinder is a UNIT mesh (extent -0.5..0.5 on every
+# axis). Its real size is ENTIRELY the transform:
+#     scale     = (diameter_m, diameter_m, length_m)
+#     translate = (0, 0, length_m / 2)   -> base sits on Object_02's origin
+# The authored 26 x 140 mm rod is scale (0.026, 0.026, 0.14), translate
+# z = 0.07. So a new diameter is a number, not a new mesh or an STL.
+# ============================================================
+_OBJ_MESH_PATH = "/World/robot_gripper_adapter_sensor/Object_02/Cylinder"
+_obj_len_mm = float(CONFIG["object"].get("length_mm", 140.0))
+try:
+    from pxr import Gf as _Gf, UsdGeom as _UsdGeom
+    _mesh = stage.GetPrimAtPath(_OBJ_MESH_PATH)
+    if not _mesh.IsValid():
+        print(f"[obj] WARNING: {_OBJ_MESH_PATH} not found — object left at "
+              f"its authored size. Diameter changes will NOT take effect.")
+    elif OBJ_DIAM_MM <= 0:
+        print("[obj] no diameter_mm in config; leaving object at authored size")
+    else:
+        _d_m, _l_m = OBJ_DIAM_MM / 1000.0, _obj_len_mm / 1000.0
+        _x = _UsdGeom.Xformable(_mesh)
+        _s_op = _t_op = None
+        for _op in _x.GetOrderedXformOps():
+            if _op.GetOpType() == _UsdGeom.XformOp.TypeScale:
+                _s_op = _op
+            elif _op.GetOpType() == _UsdGeom.XformOp.TypeTranslate:
+                _t_op = _op
+        _was = tuple(round(float(c), 4) for c in _s_op.Get()) if _s_op else None
+        if _s_op is None:
+            _s_op = _x.AddScaleOp()
+        _s_op.Set(_Gf.Vec3f(_d_m, _d_m, _l_m))
+        if _t_op is not None:
+            _tv = _t_op.Get()
+            _t_op.Set(type(_tv)(_tv[0], _tv[1], _l_m / 2.0))
+        print(f"[obj] size set from config: D={OBJ_DIAM_MM:.1f} mm, "
+              f"L={_obj_len_mm:.1f} mm -> scale "
+              f"({_d_m:.4f}, {_d_m:.4f}, {_l_m:.4f})"
+              + (f"  (was {_was})" if _was else ""))
+except Exception as _e:
+    print(f"[obj] WARNING: could not set object size ({type(_e).__name__}: "
+          f"{_e}) — object left at its authored size.")
+
 for prim in stage.Traverse():
     if prim.IsA(UsdPhysics.Scene):
         a = PhysxSchema.PhysxSceneAPI.Apply(prim)
@@ -473,16 +542,75 @@ if os.environ.get("GRASP_FREEZE_OBJECT", "1") != "0":
                 print(f"[grid] note: could not set object pose ({_pe}); anchoring at current pose")
                 _px, _py, _pz = _cur_pos[0], _cur_pos[1], _cur_pos[2]
 
-            _jpath = _frz + "/WorldFixedJoint"
-            _joint = UsdPhysics.FixedJoint.Define(stage, _jpath)
-            _joint.CreateBody1Rel().SetTargets([_frz])
-            _joint.CreateLocalPos0Attr().Set(Gf.Vec3f(float(_px), float(_py), float(_pz)))
-            _joint.CreateLocalRot0Attr().Set(_q)
-            _joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
-            _joint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
-            print(f"[grid] cylinder BOLTED (dynamic) at pose ({_px:.4f},{_py:.4f},{_pz:.4f}) "
-                  f"orient={_orient} tilt={OBJ_TILT_DEG:.1f} deg about {OBJ_TILT_AXIS} "
-                  f"(centre kept at {[round(c,4) for c in OBJ_CENTER]})")
+            # ---- HOW THE OBJECT IS HELD ---------------------------------
+            # Two different things, and Berith asked specifically about the
+            # second one (31 Jul 2026):
+            #   BOLTED (default) - a DYNAMIC rigid body pinned by a PhysX
+            #       FixedJoint. The solver still integrates it; the joint is
+            #       compliant, so in principle it can micro-move. Measured
+            #       movement has been 0.00 mm on every run so far.
+            #   KINEMATIC        - physics:kinematicEnabled = True. The body
+            #       is not integrated at all: it is infinitely heavy and
+            #       cannot respond to contact. Contact is then resolved
+            #       purely against a fixed surface.
+            # Set GRASP_OBJECT_KINEMATIC=1 to use the second.
+            _kin = os.environ.get("GRASP_OBJECT_KINEMATIC") == "1"
+            if _kin:
+                try:
+                    # The BOLTED path gets its ORIENTATION from the fixed
+                    # joint (LocalRot0), not from the prim transform -- the
+                    # pose-setting code above only writes xform ops that
+                    # ALREADY exist, so a missing xformOp:orient is skipped
+                    # silently. With no joint, that left the rod upright.
+                    # So for KINEMATIC we author the transform explicitly.
+                    _xf = UsdGeom.Xformable(_obj)
+                    _xf.ClearXformOpOrder()
+                    _xf.AddTranslateOp().Set(Gf.Vec3d(float(_px), float(_py),
+                                                      float(_pz)))
+                    _xf.AddOrientOp(UsdGeom.XformOp.PrecisionFloat).Set(
+                        Gf.Quatf(_q))
+
+                    _rb = UsdPhysics.RigidBodyAPI.Get(stage, _frz)
+                    if not _rb:
+                        _rb = UsdPhysics.RigidBodyAPI.Apply(_obj)
+                    _rb.CreateKinematicEnabledAttr().Set(True)
+
+                    # READ BACK: prove the tilt actually landed on the prim,
+                    # instead of trusting the value we asked for.
+                    _m = UsdGeom.Xformable(_obj).ComputeLocalToWorldTransform(
+                        Usd.TimeCode.Default())
+                    _axis_local = {"X": Gf.Vec3d(0, 0, 1),
+                                   "Y": Gf.Vec3d(0, 0, 1)}.get(
+                        OBJ_TILT_AXIS, Gf.Vec3d(0, 0, 1))
+                    _up = _m.TransformDir(_axis_local)
+                    _up = _up / (_up.GetLength() or 1.0)
+                    _tilt_meas = np.degrees(np.arccos(
+                        max(-1.0, min(1.0, float(_up[2])))))
+                    print(f"[grid] cylinder KINEMATIC at pose "
+                          f"({_px:.4f},{_py:.4f},{_pz:.4f}) orient={_orient} "
+                          f"tilt={OBJ_TILT_DEG:.1f} deg about {OBJ_TILT_AXIS} "
+                          f"(no fixed joint; body not integrated by PhysX)")
+                    print(f"[grid] KINEMATIC pose READBACK: rod axis is "
+                          f"{_tilt_meas:.2f} deg from world Z "
+                          f"(asked for {abs(OBJ_TILT_DEG):.2f})"
+                          + ("   <-- MISMATCH, tilt did NOT apply"
+                             if abs(_tilt_meas - abs(OBJ_TILT_DEG)) > 1.0
+                             else "   OK"))
+                except Exception as _ke:
+                    print(f"[grid] WARNING: kinematic setup failed ({_ke}); "
+                          f"falling back to BOLTED")
+                    _kin = False
+            if not _kin:
+                _jpath = _frz + "/WorldFixedJoint"
+                _joint = UsdPhysics.FixedJoint.Define(stage, _jpath)
+                _joint.CreateBody1Rel().SetTargets([_frz])
+                _joint.CreateLocalPos0Attr().Set(Gf.Vec3f(float(_px), float(_py), float(_pz)))
+                _joint.CreateLocalRot0Attr().Set(_q)
+                _joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+                _joint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
+                print(f"[grid] cylinder BOLTED (dynamic) at pose ({_px:.4f},{_py:.4f},{_pz:.4f}) "
+                      f"orient={_orient} tilt={OBJ_TILT_DEG:.1f} deg about {OBJ_TILT_AXIS} "
+                      f"(centre kept at {[round(c,4) for c in OBJ_CENTER]})")
         else:
             print(f"[grid] WARNING: {_frz} not found, cannot bolt.")
     except Exception as e:
@@ -605,7 +733,8 @@ tq_base = rotvec_to_quat(TOOL_DOWN_ROTVEC)
 #   "z" -> spin about tool local Z  (tool approach axis for this gripper)
 # We default to "z" (tool approach axis), which is the in-plane spin you want.
 # It is easy to test the others to find which one rotates the contact pattern.
-ROT_DEG = 0.0   # no per-grasp finger rotation in the config collector (yet)
+# ROT_DEG = 0.0   # no per-grasp finger rotation in the config collector (yet)
+ROT_DEG = float(os.environ.get("GRASP_ROT_DEG", "0.0"))
 ROT_AXIS = os.environ.get("GRASP_ROT_AXIS", "z").lower()
 
 if abs(ROT_DEG) > 1e-6:
@@ -622,6 +751,32 @@ if abs(ROT_DEG) > 1e-6:
     print(f"[grid] in-plane spin {ROT_DEG} deg about TOOL-LOCAL {ROT_AXIS.upper()} axis")
 else:
     tq = tq_base
+
+# ---- PIVOT CORRECTION: roll the pad about ITSELF, not about the flange ----
+# GRID_POINTS was built at load time as
+#     EE_z = pad_target_z + TOOL_OFFSET_Z
+# i.e. the pad is assumed to hang STRAIGHT DOWN from the flange. That holds
+# only while the tool is vertical. Rolling the tool swings the pad on the
+# 156.6 mm lever arm instead of spinning it in place: at 20 deg that is
+# 156.6*sin20 = 53.5 mm sideways and 156.6*(1-cos20) = 9.4 mm down, which is
+# exactly the mismatch seen between the GUI preview and Isaac on 2026-08-03.
+#
+# Fix: carry the SAME offset vector, expressed in the tool frame, through the
+# new orientation.  v_world_new = R(tq) . R(tq_base)^-1 . (0, 0, TOOL_OFFSET_Z)
+# With no spin this collapses to the original (0, 0, TOOL_OFFSET_Z), so runs
+# without GRASP_ROT_DEG are bit-for-bit unchanged.
+if abs(ROT_DEG) > 1e-6:
+    _v0 = np.array([0.0, 0.0, TOOL_OFFSET_Z])
+    _Rb = rotmat(tq_base)
+    _v_new = rotmat(tq) @ (_Rb.T @ _v0)
+    for _gp in GRID_POINTS:
+        # recover the pad target this point was built from, then re-offset
+        _pad = np.array(_gp["world"]) - _v0
+        _gp["world"] = list(_pad + _v_new)
+    _d = _v_new - _v0
+    print(f"[grid] pivot correction: EE target shifted by "
+          f"({_d[0]*1000:+.1f}, {_d[1]*1000:+.1f}, {_d[2]*1000:+.1f}) mm "
+          f"so the pad rolls about its own centre")
 
 current_grip = [0.0]
 
@@ -1656,6 +1811,52 @@ try:
                 print(f"[cal] Nothing was written; the previous calibration (if any) is kept.")
                 EXIT_CODE = 4
                 raise _CalNoContact()   # skip the store below
+
+            # ---- PEAK BAND CHECK ------------------------------------------
+            # Contact alone is not enough: CLOSE_RAD on a NEW diameter is a
+            # hand estimate, and a bad one still makes contact — just far too
+            # light or hard enough to crush. Either way the pad face ends up
+            # at the wrong height, so the TOOL_OFFSET_Z we are about to store
+            # would be wrong AND the bad close_rad would be silently reused
+            # for every future run. Compare against the verified 26 mm grasp.
+            _ref = 13201.0
+            try:
+                _ref = float(_CAL.get("26.0", {}).get("tactile_peak_sum", _ref))
+            except Exception:
+                pass
+            _lo, _hi = 0.5 * _ref, 2.0 * _ref
+            if not (_lo <= _peak <= _hi) and os.environ.get("GRASP_CAL_FORCE") != "1":
+                _too_light = _peak < _lo
+                # span ~= 85 - 106*rad (mm), so 0.01 rad ~= 1.06 mm of squeeze
+                _step = 0.03 if abs(_peak - _ref) > _ref else 0.015
+                _sugg = CLOSE_RAD + (_step if _too_light else -_step)
+                print(f"\n[cal] REFUSING TO STORE: tactile peak {_peak:.0f} is "
+                      f"{'TOO LOW' if _too_light else 'TOO HIGH'} — outside the "
+                      f"sane band {_lo:.0f}..{_hi:.0f} (26 mm reference {_ref:.0f}).")
+                print(f"[cal] CLOSE_RAD = {CLOSE_RAD:.4f} rad "
+                      f"{'barely touches' if _too_light else 'over-compresses'} "
+                      f"the {OBJ_DIAM_MM:.1f} mm object.")
+                print(f"[cal] Re-run calibrate with "
+                      f"GRASP_CLOSE_RAD={_sugg:.3f}  "
+                      f"({'+' if _too_light else '-'}{_step:.3f} rad = "
+                      f"{'+' if _too_light else '-'}{_step*106:.1f} mm of squeeze).")
+                print(f"[cal] Nothing was written; the previous calibration "
+                      f"(if any) is kept.  Override with GRASP_CAL_FORCE=1.")
+                EXIT_CODE = 5
+                raise _CalNoContact()   # skip the store below
+
+            # ---- OBJECT MUST NOT HAVE MOVED -------------------------------
+            # If the rod shifted during the calibrate grasp, the pad pose we
+            # are about to measure belongs to a geometry that no longer holds.
+            if _pt.get("object_moved") is True and os.environ.get("GRASP_CAL_FORCE") != "1":
+                _mv = _pt.get("object_moved_during_close_mm")
+                print(f"\n[cal] REFUSING TO STORE: the object MOVED during the "
+                      f"calibrate grasp ({_mv} mm).")
+                print(f"[cal] The measured pad pose does not correspond to a "
+                      f"stable object. Check the fixed joint / supports, then "
+                      f"calibrate again.  Override with GRASP_CAL_FORCE=1.")
+                EXIT_CODE = 6
+                raise _CalNoContact()
 
             def _case_closed(side):
                 v = _pt.get("closed_grip", {}).get(side, {}).get("UsdGeom.XformCache")

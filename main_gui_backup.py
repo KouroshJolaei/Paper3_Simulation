@@ -17,6 +17,11 @@ bridge; Stage C the heatmap + pose-history read-back buttons.
 Run in PyCharm:  python3 main_gui.py
 """
 
+# --- FRONT (Y-Z) preview tick spacing, mm. Labelled ticks every MAJOR,
+# --- faint unlabelled gridlines every MINOR. Change these to taste.
+PREVIEW_TICK_MAJOR_MM = 10.0
+PREVIEW_TICK_MINOR_MM = 2.0
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 import numpy as np
@@ -24,6 +29,7 @@ import os, json, subprocess, threading
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.patches as mpatches
+from matplotlib.ticker import MultipleLocator
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
@@ -42,30 +48,57 @@ CALIB_CONFIG_JSON = os.path.join(PROJECT, "Data", "gui_calib_config.json")
 ISAAC_PY  = os.path.expanduser("~/isaacsim/python.sh")
 COLLECT_PY = os.path.join(PROJECT, "sim", "collect_from_config.py")
 EXAMPLES_DIR = os.path.expanduser("~/Paper3_Simulation/TSF-85/examples")
-
-
-def grid_2d(nx, ny, step_mm):
+ 
+def grid_2d(nx, ny, step_mm, centered=False):
     """Return list of (dx, dy) offsets in mm for the grasp grid.
+    dx runs along Z (up/down the face), dy along Y (across it).
 
-    SIGNED / ANCHORED convention:
-      the grid is ANCHORED at the entered pad offset — offset (0,0) is
-      always the FIRST point (pt00). |n| = number of points along that
-      axis; the SIGN picks the direction the grid extends:
+    ANCHORED (centered=False, the original behaviour):
+      offset (0,0) is the FIRST point (pt00) and the grid grows away from
+      it. |n| = number of points on that axis; the SIGN picks direction:
         nx = +3 -> 0, +step, +2*step      nx = -3 -> 0, -step, -2*step
-      (the old centred grid = an anchored grid whose base sits at one edge)
+
+    CENTERED (centered=True):
+      the entered pad offset sits in the MIDDLE and the grid mirrors both
+      ways, so the initial grasp can be extrapolated in every direction.
+      |n| = steps PER SIDE, so an axis holds 2|n|+1 points:
+        nx = 2 -> -2, -1, 0, +1, +2  (5 points)
+      Total points = (2|nx|+1) * (2|ny|+1) — 2,3 gives 35, not 12.
+      Sign is ignored here: a mirrored grid has no direction.
+      pt00 is still (0,0), the CENTRE: the collector starts there, and it
+      is the frame the stitched training pair is anchored on.
     """
     def axis(n):
         n = int(n) if int(n) != 0 else 1
         sgn = 1.0 if n > 0 else -1.0
         return sgn * np.arange(abs(n)) * step_mm
-    xs = axis(nx)
-    ys = axis(ny)
-    pts = []
-    for gy in ys:
-        for gx in xs:
-            pts.append((gx, gy))
-    return pts
 
+    def axis_centered(n):
+        k = abs(int(n))
+        return (np.arange(-k, k + 1) * float(step_mm)) if k else np.zeros(1)
+
+    xs = axis_centered(nx) if centered else axis(nx)
+    ys = axis_centered(ny) if centered else axis(ny)
+    # SERPENTINE (boustrophedon): reverse every other Y-column so the sweep
+    # snakes instead of resetting to the far end of the next column.
+    # Straight raster made the column wrap a hypot(Z_span, step) jump — 22.7 mm
+    # for a 5-row column — and the grasp right after that jump landed ~2.2 mm
+    # short of target in BOTH repeatability runs (A: pt10, B: pt06, the only
+    # two 22.7 mm moves in the run). Short moves land to <0.01 mm.
+    pts = []
+    for j, gy in enumerate(ys):
+        col = xs if (j % 2 == 0) else xs[::-1]
+        for gx in col:
+            pts.append((float(gx), float(gy)))
+    if centered:
+        # Move the centre to the front WITHOUT reordering the rest: raster
+        # order keeps consecutive grasps adjacent, which the pad-to-pad
+        # motion with joint-seed continuity depends on.
+        for i, (gx, gy) in enumerate(pts):
+            if abs(gx) < 1e-9 and abs(gy) < 1e-9:
+                pts.insert(0, pts.pop(i))
+                break
+    return pts
 
 class CockpitGUI:
     def __init__(self, root):
@@ -86,9 +119,12 @@ class CockpitGUI:
             "grid_nx":  tk.StringVar(value="2"),
             "grid_ny":  tk.StringVar(value="3"),
             "grid_step": tk.StringVar(value="8.0"),   # mm
+            # grid mirrors around the entered pad offset instead of starting there
+            "grid_centered": tk.BooleanVar(value=False),
             "headless": tk.BooleanVar(value=False),   # False = show Isaac window
             "calib_headless": tk.BooleanVar(value=False),  # Calibrate tab headless toggle
             "calib_dz": tk.StringVar(value="0.0"),  # Calibrate pad Z offset (Y stays centered)
+            "stitch_want_gsr": tk.BooleanVar(value=False),  # Stitch-tab: include GSR in validation
         }
 
         # ---- Notebook: tab 1 = collection cockpit, tab 2 = stitching ----
@@ -157,6 +193,12 @@ class CockpitGUI:
         ttk.Label(frm, text="step (mm)").grid(row=r, column=0, sticky="e")
         e = ttk.Entry(frm, textvariable=self.vars["grid_step"], width=12)
         e.grid(row=r, column=1, sticky="w"); e.bind("<Return>", lambda ev: self.refresh()); r += 1
+        ttk.Checkbutton(frm, text="centered grid (mirror both sides; n = steps PER SIDE)",
+                        variable=self.vars["grid_centered"],
+                        command=self.refresh).grid(
+            row=r, column=0, columnspan=2, sticky="w"); r += 1
+        self.grid_count = ttk.Label(frm, text="", foreground="#555")
+        self.grid_count.grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
 
         ttk.Button(frm, text="Update Preview", command=self.refresh).grid(
             row=r, column=0, columnspan=2, pady=(12, 4), sticky="ew"); r += 1
@@ -272,6 +314,7 @@ class CockpitGUI:
                 "nx": inum("grid_nx"),
                 "ny": inum("grid_ny"),
                 "step": fnum("grid_step", 1.0),
+                "centered": bool(self.vars["grid_centered"].get()),
             }
         except Exception:
             return None
@@ -282,7 +325,20 @@ class CockpitGUI:
             self.info.config(text="check numeric inputs", foreground="red"); return
 
         obj, pad = cfg["obj"], cfg["pad"]
-        offs = grid_2d(cfg["nx"], cfg["ny"], cfg["step"])  # (dx,dy) mm
+        offs = grid_2d(cfg["nx"], cfg["ny"], cfg["step"],
+                       centered=cfg["centered"])            # (dx,dy) mm
+        if hasattr(self, "grid_count"):
+            _j = [float(np.hypot(offs[i+1][0]-offs[i][0],
+                                 offs[i+1][1]-offs[i][1]))
+                  for i in range(len(offs)-1)]
+            _mx = max(_j) if _j else 0.0
+            self.grid_count.config(
+                text=f"{len(offs)} grasp points"
+                     + ("  (centered: n = per side)" if cfg["centered"]
+                        else "  (anchored at pad offset)")
+                     + f"   ~{len(offs) * 2.5:.0f} min"
+                     + f"   max jump {_mx:.1f} mm",
+                foreground=("#b00" if _mx > 15.0 else "#555"))
 
         # ---------- TOP-DOWN (X-Y): two pads squeezing the cylinder along X ----------
         ax = self.ax_top; ax.clear()
@@ -403,7 +459,17 @@ class CockpitGUI:
         except Exception:
             pass
 
-        ax.legend(fontsize=6, loc="upper right"); ax.grid(alpha=0.3)
+        ax.legend(fontsize=6, loc="upper right")
+        # Fine ticks: the grid steps are ~5 mm, so 20/50 mm ticks were far too
+        # coarse to read a pad position off the plot.
+        ax.xaxis.set_major_locator(MultipleLocator(PREVIEW_TICK_MAJOR_MM))
+        ax.yaxis.set_major_locator(MultipleLocator(PREVIEW_TICK_MAJOR_MM))
+        ax.xaxis.set_minor_locator(MultipleLocator(PREVIEW_TICK_MINOR_MM))
+        ax.yaxis.set_minor_locator(MultipleLocator(PREVIEW_TICK_MINOR_MM))
+        ax.tick_params(axis="both", which="major", labelsize=7)
+        ax.tick_params(axis="both", which="minor", length=2)
+        ax.grid(which="major", alpha=0.35, linewidth=0.7)
+        ax.grid(which="minor", alpha=0.15, linewidth=0.4)
 
         # ---------- 3D scene: cylinder + two pads + base + grid (real size) ----------
         ax = self.ax_3d; ax.clear()
@@ -481,7 +547,8 @@ class CockpitGUI:
         cfg = self._read()
         if cfg is None:
             return None
-        offs = grid_2d(cfg["nx"], cfg["ny"], cfg["step"])   # (dx,dy) mm on the face
+        offs = grid_2d(cfg["nx"], cfg["ny"], cfg["step"],
+                       centered=cfg["centered"])   # (dx,dy) mm on the face
         # each grasp point = pad offset from object centre (y,z), plus the base pad offset
         points = []
         for k, (gx, gy) in enumerate(offs):
@@ -506,6 +573,7 @@ class CockpitGUI:
             },
             "grid": {
                 "nx": cfg["nx"], "ny": cfg["ny"], "step_mm": cfg["step"],
+                "centered": cfg["centered"],
                 "n_points": len(points),
             },
             "points": points,
@@ -1178,6 +1246,25 @@ class CockpitGUI:
                    command=self.do_export_pair).grid(
             row=r, column=0, columnspan=3, sticky="ew", pady=3); r += 1
 
+        # ---- Block 2 validation: stitch round-trip fidelity (SSIM / TC / GSR) ----
+        ttk.Separator(frm, orient="horizontal").grid(
+            row=r, column=0, columnspan=3, sticky="ew", pady=(10, 6)); r += 1
+        ttk.Label(frm, text="VALIDATE stitch fidelity (round-trip)",
+                  font=("", 9, "bold")).grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
+        ttk.Label(frm, justify="left", foreground="#555", wraplength=430, text=(
+            "Re-samples the stitched canvas at each grasp's own taxel positions and\n"
+            "compares recovered-vs-original with SSIM, Tactile-Centroid error, and\n"
+            "GSR. This checks the STITCHER as a container (high SSIM / low TC is\n"
+            "expected, esp. the center grasp) — it is NOT model completion.\n"
+            "GSR needs TensorFlow; it prints 'disabled' and skips if unavailable.")
+                  ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, 4)); r += 1
+        ttk.Checkbutton(frm, text="include GSR (needs TensorFlow + model)",
+                        variable=self.vars["stitch_want_gsr"]).grid(
+            row=r, column=0, columnspan=3, sticky="w"); r += 1
+        ttk.Button(frm, text="Validate Stitch (SSIM / TC / GSR)",
+                   command=self.do_validate).grid(
+            row=r, column=0, columnspan=3, sticky="ew", pady=(4, 3)); r += 1
+
         self.stitch_status = ttk.Label(frm, text="", foreground="#0a6",
                                        wraplength=430, justify="left")
         self.stitch_status.grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0)); r += 1
@@ -1205,6 +1292,23 @@ class CockpitGUI:
                      os.path.join(PROJECT, "sim", "stitching.py")):
             if os.path.exists(cand):
                 spec = importlib.util.spec_from_file_location("stitching", cand)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+        return None
+
+    def _load_validation_module(self):
+        """Load viz/validation.py. It imports stitching.py itself, so make sure
+        the viz/ dir is on sys.path first."""
+        import importlib.util, sys
+        for cand in (os.path.join(PROJECT, "viz", "validation.py"),
+                     os.path.join(PROJECT, "validation.py"),
+                     os.path.join(PROJECT, "sim", "validation.py")):
+            if os.path.exists(cand):
+                d = os.path.dirname(cand)
+                if d not in sys.path:
+                    sys.path.insert(0, d)
+                spec = importlib.util.spec_from_file_location("validation", cand)
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
                 return mod
@@ -1265,6 +1369,57 @@ class CockpitGUI:
             messagebox.showerror("Stitching",
                 "Export failed:\n\n" + traceback.format_exc())
 
+    def do_validate(self):
+        """Round-trip validate the stitch (SSIM / TC / GSR) and show the report
+        in a scrollable window. Runs in a thread because GSR/TensorFlow can take
+        a few seconds to import the first time."""
+        import traceback, threading
+        run = self._stitch_target_dir()
+        try:
+            res = float(self.vars["stitch_res"].get())
+        except Exception:
+            res = 1.0
+        want_gsr = bool(self.vars["stitch_want_gsr"].get())
+        self.stitch_status.config(
+            text="validating stitch (this can take a few seconds"
+                 + (", loading TensorFlow for GSR…" if want_gsr else "") + ")",
+            foreground="#06a")
+
+        def _worker():
+            try:
+                mod = self._load_validation_module()
+                if mod is None:
+                    self.root.after(0, lambda: messagebox.showerror(
+                        "Validate", "validation.py not found (expected in viz/)."))
+                    return
+                results, report = mod.validate_and_save(run, res, want_gsr=want_gsr)
+                self.root.after(0, lambda: self._show_validation_report(run, report))
+            except Exception:
+                tb = traceback.format_exc()
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Validate", "Validation failed:\n\n" + tb))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_validation_report(self, run, report):
+        win = tk.Toplevel(self.root)
+        win.title("Stitch round-trip validation — " + os.path.basename(run))
+        txt = tk.Text(win, width=78, height=28, wrap="none",
+                      font=("TkFixedFont", 10))
+        txt.insert("1.0", report)
+        txt.configure(state="normal")
+        yscroll = ttk.Scrollbar(win, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=yscroll.set)
+        txt.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=10)
+        yscroll.grid(row=0, column=1, sticky="ns", pady=10)
+        win.columnconfigure(0, weight=1); win.rowconfigure(0, weight=1)
+        def _copy():
+            self.root.clipboard_clear(); self.root.clipboard_append(report)
+        ttk.Button(win, text="Copy report", command=_copy).grid(
+            row=1, column=0, columnspan=2, pady=(0, 10))
+        self.stitch_status.config(
+            text="validation done → saved to " + os.path.basename(run)
+                 + "/Stitched/validation_report.txt", foreground="#0a6")
 
 if __name__ == "__main__":
     root = tk.Tk()

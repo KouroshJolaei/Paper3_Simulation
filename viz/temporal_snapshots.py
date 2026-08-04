@@ -38,9 +38,15 @@ POST_SECONDS = 3.0   # snapshot #4 : 3 s after squeeze start
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
+# Imported as a MODULE (not "from ... import CONST") so that flipping
+# SUBTRACT_BASELINE in stitching.py takes effect here too — one source of
+# truth for how a tactile frame is turned into pressure.
 try:
-    from stitching import _read_tactile_csv as _read_csv_tolerant
+    import stitching as _ST
+    _read_csv_tolerant = _ST._read_tactile_csv
 except Exception:                                    # standalone fallback
+    _ST = None
+
     def _read_csv_tolerant(path):
         try:
             return pd.read_csv(path, on_bad_lines="skip")
@@ -57,8 +63,28 @@ def extract_snapshots(csv_path):
     df = _read_csv_tolerant(csv_path)
     pred = [c for c in df.columns if c.startswith("pred_")]
     v = df[pred].to_numpy()
+    t = df["time_sec"].to_numpy() if "time_sec" in df.columns else np.arange(len(v))/60.0
+
+    # ---- baseline, matching stitching.hold_average exactly -------------
+    # The pre/post-contact frames (sum near this grasp's minimum) are the
+    # pad-locked sensor floor. Subtract it BEFORE finding the 5/50/95%
+    # crossings: thresholds taken on the raw sums would be measured
+    # against contact+floor and land on the wrong frames.
+    _sub = getattr(_ST, "SUBTRACT_BASELINE", True) if _ST else True
+    _bf = getattr(_ST, "BASE_FRAC", 0.05) if _ST else 0.05
+    base_sum = 0.0
+    s0 = v.sum(1)
+    if _sub and len(s0):
+        _lo, _hi = float(s0.min()), float(s0.max())
+        _rng = _hi - _lo
+        if _rng > 0:
+            _bm = s0 <= _lo + _bf * _rng
+            if _bm.sum() >= 3:
+                _baseline = v[_bm].mean(0)
+                base_sum = float(_baseline.sum())
+                v = np.clip(v - _baseline, 0.0, None)
+
     s = v.sum(1)
-    t = df["time_sec"].to_numpy() if "time_sec" in df.columns else np.arange(len(s))/60.0
     smax = float(s.max()) if len(s) and s.max() > 0 else 1.0
 
     def first_cross(frac):
@@ -77,6 +103,8 @@ def extract_snapshots(csv_path):
         meta[key] = {"frame_index": int(i), "time_sec": float(t[i]), "sum": float(s[i])}
     meta["peak_sum"] = smax
     meta["post3s_valid"] = bool(post_valid)
+    meta["baseline_subtracted"] = bool(_sub)
+    meta["baseline_sum"] = base_sum
     return snaps, meta
 
 

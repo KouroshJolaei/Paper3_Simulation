@@ -16,6 +16,11 @@ import sys
 sys.path.insert(0, "/home/kourosh/Paper3_Simulation/curobo-stable/src")
 
 import os, json, argparse
+import csv as _csv
+
+class _CalNoContact(Exception):
+    """Raised to abort a calibrate store when the pads didn't touch the object."""
+    pass
 
 # ============================================================
 # Read the GUI config (all grid points)
@@ -32,15 +37,116 @@ OBJ_CENTER = [_obj_mm[0]/1000.0, _obj_mm[1]/1000.0, _obj_mm[2]/1000.0]
 OBJ_TILT_DEG  = float(CONFIG["object"].get("tilt_deg", 0.0))
 OBJ_TILT_AXIS = CONFIG["object"].get("tilt_axis", "X")
 
-# proven grasp constants (from our verified scene)
-# TOOL_OFFSET_Z = 0.19024   # EE target sits this much above the pad contact point
-# TOOL_OFFSET_Z = 0.12132
-# TOOL_OFFSET_Z = 0.134
-TOOL_OFFSET_Z = 0.158
+# ============================================================
+# TOOL_OFFSET_Z: per-object calibration store  (RESTORED)
+# ------------------------------------------------------------
+# The EE is commanded TOOL_OFFSET_Z above the desired pad Z. That distance
+# depends on the object diameter (the fingers swing the pad down as they close),
+# so we key a calibration store by diameter and REFUSE to run an uncalibrated
+# object rather than silently using a wrong number.
+#
+#   TOOL_OFFSET_Z(D) = (EE_z - closed_inner_finger_z) + C_ANCHOR
+#
+# C_ANCHOR = fixed pad-face-below-inner-finger-link distance (rigid geometry,
+# object independent), anchored on the verified 26 mm cylinder (offset 0.158).
+#
+# Modes:
+#   GRASP_CALIBRATE=1     -> ONE grasp, MEASURE + STORE this diameter's offset.
+#   (normal run)          -> look up this diameter; use it, or REFUSE if absent.
+#   GRASP_TOOL_OFFSET=<m> -> manual override (dev escape hatch), skips the store.
+# ============================================================
+C_ANCHOR          = 0.1332   # m, pad face below inner-finger link
+
+# The sensor 'Case' prim ORIGIN sits at the pad's END, not its centre. Measured
+# from the pad node cloud: the pad's up-the-rod length is ~41mm and the Case
+# origin is 22.3mm from the pad CENTRE along that axis. Calibration targets the
+# pad CENTRE (what the GUI draws), so it shifts the raw Case offset up by this.
+# Verify once and trim this ONE number if the pad centre is still off by X mm.
+
+
+# PAD_CENTER_ABOVE_CASE_M = 0.0223   # m, Case origin -> pad centre, along world Z
+# PAD_CENTER_ABOVE_CASE_M = 0.0293
+# PAD_CENTER_ABOVE_CASE_M = 0.0329   # measured via diag9 rim-mask census, 2026-07-22
+#                                    # (was 0.0223 from node cloud -> pad ran 10.6 mm low;
+#                                    #  0.0293 ghost deleted - also wrong by 3.6 mm)
+
+
+PAD_CENTER_ABOVE_CASE_M = 0.0221   # MEASURED from the extension's own mesh log
+                                   # (diag13, 2026-07-23): case origin -> sensing
+                                   # array centre = 22.10 mm. Confirms the original
+                                   # 0.0223. The 0.0329 census inference was wrong.
+
+
+
+
+
+CAL_DEFAULT_OFFST = 0.15     # m, provisional offset used ONLY during calibration
+CAL_FILE = os.path.expanduser("~/Paper3_Simulation/Data/pad_offset_calibration.json")
+OBJ_DIAM_MM = float(CONFIG["object"].get("diameter_mm", 0.0))
+CALIBRATE   = os.environ.get("GRASP_CALIBRATE", "0") == "1"
+
+def _load_cal():
+    try:
+        with open(CAL_FILE) as _cf:
+            return json.load(_cf)
+    except Exception:
+        return {}
+
+_CAL = _load_cal()
+_diam_key = f"{OBJ_DIAM_MM:.1f}"
+
+if os.environ.get("GRASP_TOOL_OFFSET"):            # manual override (dev)
+    TOOL_OFFSET_Z = float(os.environ["GRASP_TOOL_OFFSET"])
+    print(f"[cal] MANUAL override TOOL_OFFSET_Z = {TOOL_OFFSET_Z}")
+elif CALIBRATE:
+    TOOL_OFFSET_Z = CAL_DEFAULT_OFFST              # provisional; solved after grasp
+    print(f"[cal] CALIBRATE mode: provisional TOOL_OFFSET_Z = {TOOL_OFFSET_Z}, "
+          f"diameter {OBJ_DIAM_MM} mm")
+    _cz_mm = 0.0
+    try:
+        _cz_mm = float(CONFIG["points"][0].get("pad_offset_z_mm", 0.0))
+    except Exception:
+        _cz_mm = 0.0
+    # ONE grasp: Y centered (so the pads meet the true diameter), Z as chosen
+    CONFIG["points"] = [{"index": 0, "pad_offset_y_mm": 0.0, "pad_offset_z_mm": _cz_mm}]
+    print(f"[cal] calibrate grasp: Y=0 (centered), Z offset={_cz_mm:+.1f} mm")
+elif _diam_key in _CAL:
+    TOOL_OFFSET_Z = float(_CAL[_diam_key]["TOOL_OFFSET_Z"])
+    print(f"[cal] using calibrated TOOL_OFFSET_Z = {TOOL_OFFSET_Z} for {OBJ_DIAM_MM} mm")
+else:
+    print(f"\n[cal] REFUSING TO RUN: object diameter {OBJ_DIAM_MM} mm is NOT calibrated.")
+    print(f"[cal] Calibrate it first (Calibrate tab, or GRASP_CALIBRATE=1), then collect.")
+    print(f"[cal] Calibration file: {CAL_FILE}\n")
+    sys.exit(2)
 
 
 APPROACH_H    = 0.10
-CLOSE_RAD     = 0.55
+
+# CLOSE_RAD is the finger-joint angle we squeeze to. It is DIAMETER
+# DEPENDENT: 0.55 rad closes to ~26 mm, so on a 50 mm object the pads would
+# never meet it and on a 13 mm one they would crush it.
+#
+# The calibration store already RECORDS close_rad per diameter (it is written
+# at the end of a calibrate run) -- it was simply never read back. Now it is,
+# with the same discipline as TOOL_OFFSET_Z: use the stored value, or fall
+# back to the anchored 26 mm value only while CALIBRATING a new diameter.
+#   GRASP_CLOSE_RAD=<rad>  -> manual override (needed for the FIRST grasp on
+#                             a new diameter, before anything is stored).
+CLOSE_RAD_DEFAULT = 0.55                     # the verified 26 mm value
+if os.environ.get("GRASP_CLOSE_RAD"):
+    CLOSE_RAD = float(os.environ["GRASP_CLOSE_RAD"])
+    print(f"[cal] MANUAL override CLOSE_RAD = {CLOSE_RAD:.4f} rad")
+elif _diam_key in _CAL and "close_rad" in _CAL[_diam_key]:
+    CLOSE_RAD = float(_CAL[_diam_key]["close_rad"])
+    print(f"[cal] using calibrated CLOSE_RAD = {CLOSE_RAD:.4f} rad "
+          f"for {OBJ_DIAM_MM} mm")
+else:
+    CLOSE_RAD = CLOSE_RAD_DEFAULT
+    if abs(OBJ_DIAM_MM - 26.0) > 0.5:
+        print(f"[cal] WARNING: no stored close_rad for {OBJ_DIAM_MM} mm; "
+              f"using the 26 mm value {CLOSE_RAD:.4f} rad. Estimate for this "
+              f"diameter: {max(0.05, (85.0 - OBJ_DIAM_MM) / 106.0):.3f} rad "
+              f"(set GRASP_CLOSE_RAD to use it).")
 
 # ---- PROBLEM 1: stop lifting APPROACH_H between neighbouring grid points ----
 # Old behaviour (Berith's single-grasp routine, copied per point): for EVERY
@@ -63,6 +169,38 @@ LINE_STEPS     = 10
 # free the 3 translations (the small steps are what enforce the straight line).
 # Compare CASE13_WEIGHT = [1,1,1,1,1,0], which freed ONLY z for the descent.
 LINE_WEIGHT    = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+
+# ============================================================
+# REACHABILITY PRE-CHECK   (ported from Paper 2 _evaluate_reachability)
+# ------------------------------------------------------------
+# Before ANY motion, every grid point is dry-run: solve IK at its EE target, then
+# simulate the incremental trajectory q_home -> q_goal and enforce the same gates
+# the executor would. NOTHING MOVES. Results -> reachability_report.json;
+# unreachable points are SKIPPED and logged, never fatal.
+#
+# Paper-2 knobs kept verbatim:
+MAX_JOINT_STEP = 0.02      # rad, sizes the interpolated trajectory
+MAX_STEPS_CAP  = 500       # max interpolation steps
+COND_MAX_WARN  = 1e3       # reject if cond(J) exceeds this (near-singular)
+POS_TOL_M      = 1e-3      # 1 mm  final FK position tolerance
+ROT_TOL_DEG    = 0.5       # 0.5 deg final FK orientation tolerance
+
+# Paper-2 MANUAL_LIMITS, defaults PERMISSIVE on purpose: those gates existed to
+# shape a LOCAL regrasp search (3 mm nudges). A grid scan must let the arm travel,
+# so tight delta_bounds/one_sided would reject perfectly good points. cuRobo
+# already enforces the real UR5e joint limits from ur5e.yml, so abs_limits=None.
+# cond(J) IS kept: cuRobo will happily plan through a near-singular pose.
+# Turn any gate on here (no GUI needed) if you ever want it.
+MANUAL_LIMITS = {
+    "frozen_joints":   [],      # e.g. [5] to freeze wrist_3
+    "one_sided":       {},      # e.g. {1: "neg"}
+    "delta_bounds":    {},      # e.g. {0: (-0.03, 0.03)}
+    "per_iter_dq_cap": None,    # e.g. 0.03 rad global per-step cap
+    "abs_limits":      None,    # e.g. [(qmin,qmax)]*6  (None -> cuRobo's own)
+}
+REACH_ONLY  = os.environ.get("GRASP_REACH_ONLY", "0") == "1"  # check + exit, no motion
+REACH_CHECK = os.environ.get("GRASP_REACH_CHECK", "1") == "1" # auto-check before a run
+REACH_SKIP  = os.environ.get("GRASP_REACH_SKIP", "1") == "1"  # skip unreachable points
 
 # where to write data — fresh timestamped folder per run (no old data mixing in)
 import datetime as _dt
@@ -143,6 +281,20 @@ TSF_EXT_SEARCH    = "/home/kourosh/Paper3_Simulation/TSF-85"
 ARM_JOINT_NAMES     = ["shoulder_pan_joint","shoulder_lift_joint","elbow_joint",
                         "wrist_1_joint","wrist_2_joint","wrist_3_joint"]
 GRIPPER_DRIVE_JOINT = "finger_joint"
+
+# ---- SYMMETRIC CLOSE (fixes the ~2 deg gripper tilt / s1>>s2) ---------------
+# The 2F-85 is TWO independent 4-bar linkages (finger_joint drives the LEFT
+# knuckle, right_outer_knuckle_joint drives the RIGHT). We were commanding ONLY
+# finger_joint, so the right side followed passively through a compliant PhysX
+# closed loop and settled at a DIFFERENT angle. Measured at closed grip:
+#     |left_inner_finger_joint| = 0.53112   vs  |right_inner_finger_joint| = 0.51510
+#     -> 0.92 deg apart -> the two fingers sit 1.93 mm apart in Z (2.09 deg tilt)
+#     -> the right pad ends up 3.23 mm CLOSER to the rod than the left
+#     -> s1 crushes (20023) while s2 barely touches (276).
+# Driving BOTH sides to the same angle forces them to close symmetrically.
+# Set False to go back to single-joint drive.
+DRIVE_BOTH_FINGERS   = True
+GRIPPER_MIRROR_JOINT = "right_outer_knuckle_joint"
 GRIPPER_OPEN        = 0.0
 INITIAL_JOINTS_RAD  = np.array([-0.992425, -2.179929, -0.865866,
                                   -1.667783,  1.570776, -0.992413])
@@ -152,7 +304,8 @@ TOOL_DOWN_ROTVEC      = np.array([2.2214, 2.2214, 0.0])
 
 GRIPPER_RAMP_FRAMES = 60
 WAIT_GRASP_SECONDS  = 1.0
-WAIT_HOLD_SECONDS   = 1.0
+# WAIT_HOLD_SECONDS   = 1.0
+WAIT_HOLD_SECONDS   = 3.5   # >3s so the +3s temporal snapshot lands during the hold, not after release
 N_STEPS             = 10
 CASE13_WEIGHT       = [1.0, 1.0, 1.0, 1.0, 1.0, 0.0]
 
@@ -196,6 +349,50 @@ pc.set_broadphase_type("GPU")
 world.scene.add_default_ground_plane()
 add_reference_to_stage(usd_path=USD_PATH, prim_path=ROBOT_PRIM_PATH)
 stage = world.stage
+
+# ============================================================
+# OBJECT SIZE — set from the config, no separate scene file per object.
+#
+# /World/.../Object_02/Cylinder is a UNIT mesh (extent -0.5..0.5 on every
+# axis). Its real size is ENTIRELY the transform:
+#     scale     = (diameter_m, diameter_m, length_m)
+#     translate = (0, 0, length_m / 2)   -> base sits on Object_02's origin
+# The authored 26 x 140 mm rod is scale (0.026, 0.026, 0.14), translate
+# z = 0.07. So a new diameter is a number, not a new mesh or an STL.
+# ============================================================
+_OBJ_MESH_PATH = "/World/robot_gripper_adapter_sensor/Object_02/Cylinder"
+_obj_len_mm = float(CONFIG["object"].get("length_mm", 140.0))
+try:
+    from pxr import Gf as _Gf, UsdGeom as _UsdGeom
+    _mesh = stage.GetPrimAtPath(_OBJ_MESH_PATH)
+    if not _mesh.IsValid():
+        print(f"[obj] WARNING: {_OBJ_MESH_PATH} not found — object left at "
+              f"its authored size. Diameter changes will NOT take effect.")
+    elif OBJ_DIAM_MM <= 0:
+        print("[obj] no diameter_mm in config; leaving object at authored size")
+    else:
+        _d_m, _l_m = OBJ_DIAM_MM / 1000.0, _obj_len_mm / 1000.0
+        _x = _UsdGeom.Xformable(_mesh)
+        _s_op = _t_op = None
+        for _op in _x.GetOrderedXformOps():
+            if _op.GetOpType() == _UsdGeom.XformOp.TypeScale:
+                _s_op = _op
+            elif _op.GetOpType() == _UsdGeom.XformOp.TypeTranslate:
+                _t_op = _op
+        _was = tuple(round(float(c), 4) for c in _s_op.Get()) if _s_op else None
+        if _s_op is None:
+            _s_op = _x.AddScaleOp()
+        _s_op.Set(_Gf.Vec3f(_d_m, _d_m, _l_m))
+        if _t_op is not None:
+            _tv = _t_op.Get()
+            _t_op.Set(type(_tv)(_tv[0], _tv[1], _l_m / 2.0))
+        print(f"[obj] size set from config: D={OBJ_DIAM_MM:.1f} mm, "
+              f"L={_obj_len_mm:.1f} mm -> scale "
+              f"({_d_m:.4f}, {_d_m:.4f}, {_l_m:.4f})"
+              + (f"  (was {_was})" if _was else ""))
+except Exception as _e:
+    print(f"[obj] WARNING: could not set object size ({type(_e).__name__}: "
+          f"{_e}) — object left at its authored size.")
 
 for prim in stage.Traverse():
     if prim.IsA(UsdPhysics.Scene):
@@ -345,16 +542,75 @@ if os.environ.get("GRASP_FREEZE_OBJECT", "1") != "0":
                 print(f"[grid] note: could not set object pose ({_pe}); anchoring at current pose")
                 _px, _py, _pz = _cur_pos[0], _cur_pos[1], _cur_pos[2]
 
-            _jpath = _frz + "/WorldFixedJoint"
-            _joint = UsdPhysics.FixedJoint.Define(stage, _jpath)
-            _joint.CreateBody1Rel().SetTargets([_frz])
-            _joint.CreateLocalPos0Attr().Set(Gf.Vec3f(float(_px), float(_py), float(_pz)))
-            _joint.CreateLocalRot0Attr().Set(_q)
-            _joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
-            _joint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
-            print(f"[grid] cylinder BOLTED (dynamic) at pose ({_px:.4f},{_py:.4f},{_pz:.4f}) "
-                  f"orient={_orient} tilt={OBJ_TILT_DEG:.1f} deg about {OBJ_TILT_AXIS} "
-                  f"(centre kept at {[round(c,4) for c in OBJ_CENTER]})")
+            # ---- HOW THE OBJECT IS HELD ---------------------------------
+            # Two different things, and Berith asked specifically about the
+            # second one (31 Jul 2026):
+            #   BOLTED (default) - a DYNAMIC rigid body pinned by a PhysX
+            #       FixedJoint. The solver still integrates it; the joint is
+            #       compliant, so in principle it can micro-move. Measured
+            #       movement has been 0.00 mm on every run so far.
+            #   KINEMATIC        - physics:kinematicEnabled = True. The body
+            #       is not integrated at all: it is infinitely heavy and
+            #       cannot respond to contact. Contact is then resolved
+            #       purely against a fixed surface.
+            # Set GRASP_OBJECT_KINEMATIC=1 to use the second.
+            _kin = os.environ.get("GRASP_OBJECT_KINEMATIC") == "1"
+            if _kin:
+                try:
+                    # The BOLTED path gets its ORIENTATION from the fixed
+                    # joint (LocalRot0), not from the prim transform -- the
+                    # pose-setting code above only writes xform ops that
+                    # ALREADY exist, so a missing xformOp:orient is skipped
+                    # silently. With no joint, that left the rod upright.
+                    # So for KINEMATIC we author the transform explicitly.
+                    _xf = UsdGeom.Xformable(_obj)
+                    _xf.ClearXformOpOrder()
+                    _xf.AddTranslateOp().Set(Gf.Vec3d(float(_px), float(_py),
+                                                      float(_pz)))
+                    _xf.AddOrientOp(UsdGeom.XformOp.PrecisionFloat).Set(
+                        Gf.Quatf(_q))
+
+                    _rb = UsdPhysics.RigidBodyAPI.Get(stage, _frz)
+                    if not _rb:
+                        _rb = UsdPhysics.RigidBodyAPI.Apply(_obj)
+                    _rb.CreateKinematicEnabledAttr().Set(True)
+
+                    # READ BACK: prove the tilt actually landed on the prim,
+                    # instead of trusting the value we asked for.
+                    _m = UsdGeom.Xformable(_obj).ComputeLocalToWorldTransform(
+                        Usd.TimeCode.Default())
+                    _axis_local = {"X": Gf.Vec3d(0, 0, 1),
+                                   "Y": Gf.Vec3d(0, 0, 1)}.get(
+                        OBJ_TILT_AXIS, Gf.Vec3d(0, 0, 1))
+                    _up = _m.TransformDir(_axis_local)
+                    _up = _up / (_up.GetLength() or 1.0)
+                    _tilt_meas = np.degrees(np.arccos(
+                        max(-1.0, min(1.0, float(_up[2])))))
+                    print(f"[grid] cylinder KINEMATIC at pose "
+                          f"({_px:.4f},{_py:.4f},{_pz:.4f}) orient={_orient} "
+                          f"tilt={OBJ_TILT_DEG:.1f} deg about {OBJ_TILT_AXIS} "
+                          f"(no fixed joint; body not integrated by PhysX)")
+                    print(f"[grid] KINEMATIC pose READBACK: rod axis is "
+                          f"{_tilt_meas:.2f} deg from world Z "
+                          f"(asked for {abs(OBJ_TILT_DEG):.2f})"
+                          + ("   <-- MISMATCH, tilt did NOT apply"
+                             if abs(_tilt_meas - abs(OBJ_TILT_DEG)) > 1.0
+                             else "   OK"))
+                except Exception as _ke:
+                    print(f"[grid] WARNING: kinematic setup failed ({_ke}); "
+                          f"falling back to BOLTED")
+                    _kin = False
+            if not _kin:
+                _jpath = _frz + "/WorldFixedJoint"
+                _joint = UsdPhysics.FixedJoint.Define(stage, _jpath)
+                _joint.CreateBody1Rel().SetTargets([_frz])
+                _joint.CreateLocalPos0Attr().Set(Gf.Vec3f(float(_px), float(_py), float(_pz)))
+                _joint.CreateLocalRot0Attr().Set(_q)
+                _joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+                _joint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
+                print(f"[grid] cylinder BOLTED (dynamic) at pose ({_px:.4f},{_py:.4f},{_pz:.4f}) "
+                      f"orient={_orient} tilt={OBJ_TILT_DEG:.1f} deg about {OBJ_TILT_AXIS} "
+                      f"(centre kept at {[round(c,4) for c in OBJ_CENTER]})")
         else:
             print(f"[grid] WARNING: {_frz} not found, cannot bolt.")
     except Exception as e:
@@ -379,6 +635,23 @@ except ValueError:
     cand = [d for d in dn if d.endswith("/"+GRIPPER_DRIVE_JOINT)
                               or d.endswith(GRIPPER_DRIVE_JOINT)]
     gi = np.array([dn.index(cand[0])], dtype=np.int32) if cand else None
+
+# add the RIGHT drive joint so both 4-bars are commanded to the same angle
+if DRIVE_BOTH_FINGERS and gi is not None:
+    _mir = None
+    if GRIPPER_MIRROR_JOINT in dn:
+        _mir = dn.index(GRIPPER_MIRROR_JOINT)
+    else:
+        _c = [d for d in dn if d.endswith("/"+GRIPPER_MIRROR_JOINT)
+                                or d.endswith(GRIPPER_MIRROR_JOINT)]
+        _mir = dn.index(_c[0]) if _c else None
+    if _mir is not None:
+        gi = np.array([int(gi[0]), int(_mir)], dtype=np.int32)
+        print(f"[grid] SYMMETRIC close: driving both '{GRIPPER_DRIVE_JOINT}' and "
+              f"'{GRIPPER_MIRROR_JOINT}' (dof {gi.tolist()})")
+    else:
+        print(f"[grid] WARNING: '{GRIPPER_MIRROR_JOINT}' not a DOF -> "
+              f"single-joint drive (expect the ~2 deg tilt / s1>>s2 to persist)")
 
 dp = np.array(robot.get_joint_positions(), dtype=np.float32)
 dp[ai] = INITIAL_JOINTS_RAD
@@ -460,7 +733,8 @@ tq_base = rotvec_to_quat(TOOL_DOWN_ROTVEC)
 #   "z" -> spin about tool local Z  (tool approach axis for this gripper)
 # We default to "z" (tool approach axis), which is the in-plane spin you want.
 # It is easy to test the others to find which one rotates the contact pattern.
-ROT_DEG = 0.0   # no per-grasp finger rotation in the config collector (yet)
+# ROT_DEG = 0.0   # no per-grasp finger rotation in the config collector (yet)
+ROT_DEG = float(os.environ.get("GRASP_ROT_DEG", "0.0"))
 ROT_AXIS = os.environ.get("GRASP_ROT_AXIS", "z").lower()
 
 if abs(ROT_DEG) > 1e-6:
@@ -478,6 +752,32 @@ if abs(ROT_DEG) > 1e-6:
 else:
     tq = tq_base
 
+# ---- PIVOT CORRECTION: roll the pad about ITSELF, not about the flange ----
+# GRID_POINTS was built at load time as
+#     EE_z = pad_target_z + TOOL_OFFSET_Z
+# i.e. the pad is assumed to hang STRAIGHT DOWN from the flange. That holds
+# only while the tool is vertical. Rolling the tool swings the pad on the
+# 156.6 mm lever arm instead of spinning it in place: at 20 deg that is
+# 156.6*sin20 = 53.5 mm sideways and 156.6*(1-cos20) = 9.4 mm down, which is
+# exactly the mismatch seen between the GUI preview and Isaac on 2026-08-03.
+#
+# Fix: carry the SAME offset vector, expressed in the tool frame, through the
+# new orientation.  v_world_new = R(tq) . R(tq_base)^-1 . (0, 0, TOOL_OFFSET_Z)
+# With no spin this collapses to the original (0, 0, TOOL_OFFSET_Z), so runs
+# without GRASP_ROT_DEG are bit-for-bit unchanged.
+if abs(ROT_DEG) > 1e-6:
+    _v0 = np.array([0.0, 0.0, TOOL_OFFSET_Z])
+    _Rb = rotmat(tq_base)
+    _v_new = rotmat(tq) @ (_Rb.T @ _v0)
+    for _gp in GRID_POINTS:
+        # recover the pad target this point was built from, then re-offset
+        _pad = np.array(_gp["world"]) - _v0
+        _gp["world"] = list(_pad + _v_new)
+    _d = _v_new - _v0
+    print(f"[grid] pivot correction: EE target shifted by "
+          f"({_d[0]*1000:+.1f}, {_d[1]*1000:+.1f}, {_d[2]*1000:+.1f}) mm "
+          f"so the pad rolls about its own centre")
+
 current_grip = [0.0]
 
 def apply_arm_and_grip(arm_q, grip_val=None):
@@ -488,7 +788,7 @@ def apply_arm_and_grip(arm_q, grip_val=None):
     if gi is not None:
         robot.get_articulation_controller().apply_action(
             ArticulationAction(
-                joint_positions=np.array([current_grip[0]], dtype=np.float32),
+                joint_positions=np.full(len(gi), current_grip[0], dtype=np.float32),
                 joint_indices=gi))
 
 def run_traj(traj, settle=True):
@@ -616,8 +916,14 @@ def plan_stitched_z(start_q, dz, label):
         s = JointState.from_position(
                 ta.to_device(cur_q.astype(np.float32)).view(1, -1),
                 joint_names=ARM_JOINT_NAMES)
+        # ORIENTATION: fixed tool-down `tq`, NOT the current cquat. Same bug that
+        # tilted the line move: targeting cquat makes each step inherit the last
+        # step's orientation error, so the tilt compounds down the 10-step
+        # descent with nothing to correct it. Evidence: pt00 (the only point that
+        # uses THIS descent) came out 72x asymmetric (s1 20023 / s2 276) while
+        # every point using the tq-anchored line move was 2-4x.
         g = Pose(position=ta.to_device(tgt.astype(np.float32)).view(1, 3),
-                 quaternion=ta.to_device(cquat.astype(np.float32)).view(1, 4))
+                 quaternion=ta.to_device(tq.astype(np.float32)).view(1, 4))
         r = mg.plan_single(s, g, cfg)
         if not r.success.item():
             print(f"  [{label}] step {i+1}/{N_STEPS} FAILED ({r.status})")
@@ -656,8 +962,14 @@ def plan_stitched_line(start_q, delta_world, label, n_steps=LINE_STEPS):
         s = JointState.from_position(
                 ta.to_device(cur_q.astype(np.float32)).view(1, -1),
                 joint_names=ARM_JOINT_NAMES)
+        # ORIENTATION: target the FIXED tool-down quaternion `tq`, NOT the current
+        # cquat. Using cquat made every step inherit the previous step's small
+        # orientation error, so the tilt COMPOUNDED over 10 steps x N points with
+        # nothing to re-anchor it (the old lift-to-UP used tq and reset it every
+        # point). That drift swung one pad into the rod and the other off it
+        # (s1 sum ~21000 vs s2 ~279). Targeting tq re-anchors on every step.
         g = Pose(position=ta.to_device(tgt.astype(np.float32)).view(1, 3),
-                 quaternion=ta.to_device(cquat.astype(np.float32)).view(1, 4))
+                 quaternion=ta.to_device(tq.astype(np.float32)).view(1, 4))
         r = mg.plan_single(s, g, cfg)
         if not r.success.item():
             print(f"  [{label}] line step {i+1}/{n_steps} FAILED ({r.status})")
@@ -667,6 +979,293 @@ def plan_stitched_line(start_q, delta_world, label, n_steps=LINE_STEPS):
         stitched.extend(list(tr))
         cur_q = tr[-1].copy()
     return np.array(stitched)
+
+# ============================================================
+# REACHABILITY  (port of Paper 2 _evaluate_reachability)
+# ------------------------------------------------------------
+# Kept verbatim from Paper 2: the incremental dry-run (steps sized by
+# MAX_JOINT_STEP, capped at MAX_STEPS_CAP), every limit gate (frozen_joints,
+# one_sided, delta_bounds, per_iter_dq_cap, abs_limits), the cond(J) gate, the
+# final FK tolerance (1 mm / 0.5 deg) and the {reachable, reason, ...} contract.
+#
+# Swapped for this pipeline (MoveIt/real robot -> Isaac + cuRobo):
+#   robot.fk.get_fk(...)          -> fk(q)                    (cuRobo)
+#   compute_jacobian2(robot.jac)  -> _numeric_jacobian6(q)    (finite diff on FK)
+#
+# FIXED vs Paper 2: there, the dry-run called get_jacobian6(), which returns J at
+# the CURRENT robot q, so cond(J) re-checked the same J every step (the code even
+# says "if get_jacobian6() reflects current q"). Here J is evaluated AT each q on
+# the trajectory, so the singularity gate actually means something.
+# ============================================================
+def _quat_to_R(qwxyz):
+    """cuRobo quaternion (w,x,y,z) -> 3x3 rotation matrix. numpy only."""
+    w, x, y, z = [float(v) for v in qwxyz]
+    n = np.sqrt(w*w + x*x + y*y + z*z)
+    if n < 1e-12:
+        return np.eye(3)
+    w, x, y, z = w/n, x/n, y/n, z/n
+    return np.array([
+        [1-2*(y*y+z*z),   2*(x*y-w*z),   2*(x*z+w*y)],
+        [  2*(x*y+w*z), 1-2*(x*x+z*z),   2*(y*z-w*x)],
+        [  2*(x*z-w*y),   2*(y*z+w*x), 1-2*(x*x+y*y)]], dtype=float)
+
+def _rotvec_from_R(Rm):
+    """Rotation matrix -> rotation vector (axis*angle). numpy only."""
+    c = float(np.clip((np.trace(Rm) - 1.0) * 0.5, -1.0, 1.0))
+    ang = float(np.arccos(c))
+    v = np.array([Rm[2,1]-Rm[1,2], Rm[0,2]-Rm[2,0], Rm[1,0]-Rm[0,1]], dtype=float)
+    if ang < 1e-9:
+        return 0.5 * v                       # small-angle
+    s = 2.0 * np.sin(ang)
+    if abs(s) < 1e-12:                       # ang ~ pi
+        return v / (np.linalg.norm(v) + 1e-12) * ang
+    return (v / s) * ang
+
+def _numeric_jacobian6(q, eps=1e-5):
+    """6xN spatial Jacobian at q by finite differences on cuRobo FK.
+    Paper 2 got this from the real robot (compute_jacobian2); cuRobo doesn't
+    expose one here, and 7 FK calls is cheap for a pre-check."""
+    q = np.asarray(q, float)
+    p0, quat0 = fk(q)
+    R0 = _quat_to_R(quat0)
+    J = np.zeros((6, q.size), dtype=float)
+    for i in range(q.size):
+        dq = np.zeros(q.size); dq[i] = eps
+        p1, quat1 = fk(q + dq)
+        R1 = _quat_to_R(quat1)
+        J[0:3, i] = (np.asarray(p1, float) - np.asarray(p0, float)) / eps
+        J[3:6, i] = _rotvec_from_R(R0.T @ R1) / eps
+    return J
+
+def evaluate_reachability(q_start, q_goal, manual_limits=None,
+                          max_joint_step=MAX_JOINT_STEP,
+                          max_steps_cap=MAX_STEPS_CAP,
+                          cond_max_warn=COND_MAX_WARN,
+                          pos_tol=POS_TOL_M, rot_tol_deg=ROT_TOL_DEG,
+                          check_cond=True):
+    """Dry-run q_start -> q_goal. Nothing is commanded. Paper-2 logic."""
+    ml = manual_limits or {}
+    frozen_joints   = list(ml.get("frozen_joints", []) or [])
+    one_sided       = ml.get("one_sided", {}) or {}
+    delta_bounds    = ml.get("delta_bounds", {}) or {}
+    per_iter_dq_cap = ml.get("per_iter_dq_cap", None)
+    abs_limits      = ml.get("abs_limits", None)
+    if isinstance(abs_limits, (list, tuple)):
+        abs_limits = [(-np.inf, np.inf) if v is None else tuple(v) for v in abs_limits]
+
+    q0 = np.asarray(q_start, float); q1 = np.asarray(q_goal, float)
+    rot_tol = float(np.deg2rad(rot_tol_deg))
+    limit_hits = []
+
+    # --- same step-count logic as Paper 2's _incremental_execute ---
+    dq_total = q1 - q0
+    steps_per_joint = np.ceil(np.abs(dq_total) / float(max_joint_step))
+    N = int(np.clip(np.max(steps_per_joint) if steps_per_joint.size else 2,
+                    2, int(max_steps_cap)))
+    traj = [q0 + (i / (N - 1)) * dq_total for i in range(N)]
+
+    def _violates_one_sided(dq_vec):
+        for j, mode in (one_sided or {}).items():
+            j = int(j)
+            if (mode == "pos" and dq_vec[j] < 0) or (mode == "neg" and dq_vec[j] > 0):
+                return True
+        return False
+
+    q_prev = traj[0].copy()
+    traj_q = [q_prev.copy()]
+    smin_hist = []
+    reachable, reason = True, "converged"
+
+    for k in range(1, len(traj)):
+        q_next = traj[k]; dq = q_next - q_prev
+
+        if frozen_joints:
+            bad = [j for j in frozen_joints if abs(dq[int(j)]) > 1e-12]
+            if bad:
+                reachable = False; reason = f"frozen joint {bad[0]} would move"
+                limit_hits.append(reason); break
+
+        if one_sided and _violates_one_sided(dq):
+            reachable = False; reason = "one_sided violation"
+            limit_hits.append(reason); break
+
+        if delta_bounds:
+            hit = None
+            for j, (dmin, dmax) in delta_bounds.items():
+                j = int(j)
+                if not (dmin <= dq[j] <= dmax):
+                    hit = f"delta_bounds violation @ joint {j}"; break
+            if hit:
+                reachable = False; reason = hit; limit_hits.append(hit); break
+
+        if per_iter_dq_cap is not None:
+            cap = abs(float(per_iter_dq_cap))
+            if np.any(np.abs(dq) > cap + 1e-12):
+                reachable = False; reason = "per_iter_dq_cap violation"
+                limit_hits.append(reason); break
+
+        if abs_limits:
+            hit = None
+            for j, (qmin, qmax) in enumerate(abs_limits):
+                if not (qmin - 1e-12 <= q_next[j] <= qmax + 1e-12):
+                    hit = f"abs_limits violation @ joint {j}"; break
+            if hit:
+                reachable = False; reason = hit; limit_hits.append(hit); break
+
+        if check_cond:
+            try:
+                J = _numeric_jacobian6(q_next)      # J AT this q (Paper-2 fix)
+                s = np.linalg.svd(J, compute_uv=False)
+                smin = max(float(np.min(s)), 1e-12)
+                cnd  = float(np.max(s) / smin)
+                smin_hist.append(smin)
+                if cnd > cond_max_warn:
+                    reachable = False
+                    reason = f"cond(J)={cnd:.1f} > {cond_max_warn}"
+                    limit_hits.append(reason); break
+            except Exception as _je:
+                pass                                 # no J -> skip the gate
+
+        q_prev = q_next; traj_q.append(q_prev.copy())
+
+    # --- final FK error vs the goal ---
+    p_fin, quat_fin = fk(q_prev); R_fin = _quat_to_R(quat_fin)
+    p_des, quat_des = fk(q1);     R_des = _quat_to_R(quat_des)
+    dp_final  = np.asarray(p_des, float) - np.asarray(p_fin, float)
+    ang_final = float(np.linalg.norm(_rotvec_from_R(R_fin.T @ R_des)))
+
+    if reachable:
+        if np.linalg.norm(dp_final) < pos_tol and ang_final < rot_tol:
+            reason = "converged (trajectory dry-run)"
+        else:
+            reachable = False
+            reason = "final FK error above tolerance (trajectory dry-run)"
+
+    return {
+        "reachable": bool(reachable),
+        "reason": reason,
+        "limit_hits": limit_hits,
+        "iters": len(traj_q) - 1,
+        "n_steps": N,
+        "pos_err_final_m": float(np.linalg.norm(dp_final)),
+        "rot_err_final_deg": float(np.rad2deg(ang_final)),
+        "min_sigma": float(min(smin_hist)) if smin_hist else None,
+    }
+
+def _ik_at(target_world, q_seed, label="ik"):
+    """Joint solution at an EE world target, tool pointing down.
+
+    WHY TWO TRIES: the first version planned STRAIGHT from home into the grasp
+    pose. The real run never does that — it free-moves to grasp+APPROACH_H and
+    THEN does the stitched descent. Planning straight in can fail where
+    up-then-down succeeds, which is exactly how pt00 got a FALSE 'unreachable'
+    and was skipped. So: try direct (fast), and if it fails, mirror what the run
+    actually does before declaring the point unreachable."""
+    tw = np.asarray(target_world, float)
+    tr = plan_free_move(np.asarray(q_seed, float), world_to_base(tw), f"{label}:direct")
+    if tr is not None:
+        return np.asarray(tr[-1], float)
+    up_world = tw.copy(); up_world[2] += APPROACH_H
+    tr_up = plan_free_move(np.asarray(q_seed, float), world_to_base(up_world),
+                           f"{label}:to-up")
+    if tr_up is None:
+        return None
+    q_up = np.asarray(tr_up[-1], float)
+    tr_dn = plan_stitched_z(q_up, -float(APPROACH_H), f"{label}:down")
+    if tr_dn is None:
+        return None
+    return np.asarray(tr_dn[-1], float)
+
+def precheck_reachability(grid_points, q_home):
+    """Dry-run EVERY grid point BEFORE any motion. Writes reachability_report.json.
+    Returns {index: bool}. Nothing moves."""
+    print("\n" + "=" * 60)
+    print(f"[reach] PRE-CHECK {len(grid_points)} grid points (no motion) ...")
+    report = {
+        "generated": _stamp,
+        "config": _args.config,
+        "object_center_mm": [round(v*1000, 2) for v in OBJ_CENTER],
+        "diameter_mm": OBJ_DIAM_MM,
+        "TOOL_OFFSET_Z": TOOL_OFFSET_Z,
+        "settings": {"max_joint_step": MAX_JOINT_STEP, "max_steps_cap": MAX_STEPS_CAP,
+                     "cond_max_warn": COND_MAX_WARN, "pos_tol_m": POS_TOL_M,
+                     "rot_tol_deg": ROT_TOL_DEG, "manual_limits": MANUAL_LIMITS},
+        "points": [],
+    }
+    ok_map = {}
+    q_seed = np.asarray(q_home, float).copy()
+    for gp in grid_points:
+        idx = gp["index"]; tag = f"pt{idx:02d}"
+        gw = np.array(gp["world"], float)                  # EE target (world)
+        pad_world = [gw[0], gw[1], gw[2] - TOOL_OFFSET_Z]  # the pad target you drew
+        _progress(f"[reach] {tag} IK ...")
+        q_goal = _ik_at(gw, q_seed, f"{tag}:reach-ik")
+        if q_goal is None:
+            res = {"reachable": False, "reason": "IK/plan failed (out of workspace "
+                                                 "or no collision-free solution)",
+                   "limit_hits": ["ik_failed"]}
+        else:
+            res = evaluate_reachability(q_seed, q_goal, MANUAL_LIMITS)
+
+
+
+
+            if not res["reachable"]:
+                # direct IK can land a flipped arm branch (e.g. shoulder_lift -3.5 rad)
+                # whose straight-line dry-run crosses a singularity. Before giving up,
+                # retry via the up-then-down path the real run actually uses.
+                up = gw.copy();
+                up[2] += APPROACH_H
+                tr_up = plan_free_move(np.asarray(q_seed, float), world_to_base(up),
+                                       f"{tag}:retry-up")
+                if tr_up is not None:
+                    tr_dn = plan_stitched_z(np.asarray(tr_up[-1], float),
+                                            -float(APPROACH_H), f"{tag}:retry-down")
+                    if tr_dn is not None:
+                        res2 = evaluate_reachability(q_seed,
+                                                     np.asarray(tr_dn[-1], float),
+                                                     MANUAL_LIMITS)
+                        if res2["reachable"]:
+                            q_goal, res = np.asarray(tr_dn[-1], float), res2
+
+
+
+
+            if res["reachable"]:
+                q_seed = q_goal          # chain like the real run does
+        ok_map[idx] = bool(res["reachable"])
+        row = {"index": idx,
+               "pad_offset_y_mm": gp["dy_mm"], "pad_offset_z_mm": gp["dz_mm"],
+               "pad_target_world_mm": [round(v*1000, 2) for v in pad_world],
+               "ee_target_world_mm":  [round(v*1000, 2) for v in gw.tolist()],
+               "q_goal_rad": (q_goal.tolist() if q_goal is not None else None)}
+        row.update(res)
+        report["points"].append(row)
+        mark = "OK " if res["reachable"] else "XX "
+        print(f"  {mark}{tag}  pad(y={gp['dy_mm']:+.1f}, z={gp['dz_mm']:+.1f}) "
+              f"-> {res['reason']}")
+
+    n_ok = sum(1 for v in ok_map.values() if v)
+    report["n_points"] = len(grid_points)
+    report["n_reachable"] = n_ok
+    report["n_unreachable"] = len(grid_points) - n_ok
+    out = os.path.join(OUTPUT_DIR, "reachability_report.json")
+    try:
+        with open(out, "w") as f:
+            json.dump(report, f, indent=2)
+        print(f"[reach] {n_ok}/{len(grid_points)} reachable. report -> {out}")
+    except Exception as e:
+        print(f"[reach] report write FAILED: {e}")
+    # also drop a copy next to the config so the GUI always finds the newest
+    try:
+        side = os.path.join(os.path.dirname(_args.config), "reachability_report.json")
+        with open(side, "w") as f:
+            json.dump(report, f, indent=2)
+        print(f"[reach] GUI copy -> {side}")
+    except Exception:
+        pass
+    print("=" * 60 + "\n")
+    return ok_map
 
 # ============================================================
 # NaN / physics-blowup WATCHDOG (writes to file every frame so a freeze
@@ -789,6 +1388,23 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
         _progress(f"{tag} descent EXEC start ({len(traj_dn)} wpts)")
         run_traj(traj_dn)
         _progress(f"{tag} descent EXEC done")
+        # ---- FINAL TRIM (descent path only): close the residual EE error ----
+        # The stitched descent settles ~1 mm short (settle-loop tolerance).
+        # Measure reached-vs-commanded EE and close the gap with ONE short
+        # stitched line (the same move that lands pad-to-pad at +-0.03 mm).
+        q_now = robot.get_joint_positions()[ai].copy()
+        cpos_t, _ = fk(q_now.astype(np.float32))
+        cur_world = rotmat(ROBOT_WORLD_QUAT_WXYZ) @ cpos_t + ROBOT_WORLD_POS
+        resid = np.asarray(grasp_world, float) - np.asarray(cur_world, float)
+        resid_mm = 1000.0 * float(np.linalg.norm(resid))
+        if resid_mm > 0.2:
+            _progress(f"{tag} descent TRIM start (residual {resid_mm:.2f} mm)")
+            traj_fix = plan_stitched_line(q_now, resid, f"{tag}:trim", n_steps=3)
+            if traj_fix is not None:
+                run_traj(traj_fix)
+                _progress(f"{tag} descent TRIM done")
+            else:
+                _progress(f"{tag} descent TRIM plan failed (keeping residual)")
     q_grasp = robot.get_joint_positions()[ai].copy()
     hold_qg = q_grasp.astype(np.float32)
 
@@ -827,15 +1443,51 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
                   "Robotiq_2F_85_adapter_fixed_v_sibling__1_/Robotiq_2F_85_modified/"
                   "Robotiq_2F_85")
     PROBE = (tag == "pt00")
+
+    # ---- find the REAL sensor bodies (the 'Case' rigid prims) ---------------
+    # ".../TSF_85_right/TSF_85" is an EMPTY Xform wrapper -> it never moves.
+    # The actual rigid body is TWO levels deeper (".../TSF_85/TSF_85/Case"),
+    # bolted to the finger. Path depth differs between raw USD and the referenced
+    # stage, so SEARCH for it. THIS is what fills TSF_*_CASE for the calibration.
+    def _find_case_prims():
+        found = {}
+        try:
+            for prim in world.stage.Traverse():
+                pth = str(prim.GetPath())
+                if prim.GetName() != "Case" or "TSF_85" not in pth:
+                    continue
+                if "TSF_85_right" in pth:
+                    found.setdefault("TSF_right_CASE", pth)
+                elif "TSF_85_left" in pth:
+                    found.setdefault("TSF_left_CASE", pth)
+        except Exception as _fe:
+            print(f"[{tag}] case-prim search failed: {_fe}")
+        return found
+
+    _cases = _find_case_prims()
+    if _cases:
+        print(f"[{tag}] sensor Case prims found: {list(_cases.values())}")
+    else:
+        print(f"[{tag}] WARNING: no TSF 'Case' prim found -- pad pose unavailable")
+
     _probe_prims = {
         "right_inner_finger": f"{_GRIP_ROOT}/right_inner_finger",   # s1 pad link
         "left_inner_finger":  f"{_GRIP_ROOT}/left_inner_finger",    # s2 pad link
-        # keep the deformable sensor prims too, to compare (may have no xform):
-        "TSF_right": ("/World/robot_gripper_adapter_sensor/"
-                      "robot_gripper_adapter_sensor/TSF_85_right/TSF_85"),
-        "TSF_left":  ("/World/robot_gripper_adapter_sensor/"
-                      "robot_gripper_adapter_sensor/TSF_85_left/TSF_85"),
+        # PALM: the gripper body the rod top can collide with. We add it because
+        # the estimated "palm ~ pad + 110mm" was contradicted by reality (a tip
+        # grid clears, a centre grid strikes) -> measure it, don't estimate it.
+        "gripper_base_link":  f"{_GRIP_ROOT}/base_link",
+        # OBJECT: bolted with a COMPLIANT PhysX FixedJoint, so a knock makes it
+        # lean and STAY leaning. Logging it proves whether the rod moved.
+        "object":  "/World/robot_gripper_adapter_sensor/Object_02",
+        # the OLD (wrong) wrapper prims, kept only to prove they are static:
+        "TSF_right_wrapper": ("/World/robot_gripper_adapter_sensor/"
+                              "robot_gripper_adapter_sensor/TSF_85_right/TSF_85"),
+        "TSF_left_wrapper":  ("/World/robot_gripper_adapter_sensor/"
+                              "robot_gripper_adapter_sensor/TSF_85_left/TSF_85"),
+
     }
+    _probe_prims.update(_cases)      # <-- the REAL sensor bodies (fills TSF_*_CASE)
     _probe = {}
     if PROBE:
         _probe["open_grip"] = _probe_all(_probe_prims)   # BEFORE closing
@@ -849,10 +1501,115 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
         _probe["closed_grip"] = _probe_all(_probe_prims)  # AFTER closing (has the swing)
         _probe["finger_joint_rad"] = (float(robot.get_joint_positions()[gi[0]])
                                       if gi is not None else None)
+        # DIAGNOSTIC: the collector only ever commands ONE joint ('finger_joint',
+        # which drives the LEFT outer knuckle). The RIGHT side has its own joint
+        # (right_outer_knuckle_joint) that nothing commands. If the USD does not
+        # mimic it, that side is passive -> one pad presses, the other hangs,
+        # which is exactly the s1=20023 / s2=276 pattern we keep seeing.
+        # Log EVERY gripper-ish joint so we can see whether both sides moved.
+        try:
+            _qall = robot.get_joint_positions()
+            _probe["all_gripper_joints_rad_closed"] = {
+                _n: round(float(_qall[_i]), 5)
+                for _i, _n in enumerate(robot.dof_names)
+                if any(_k in _n.lower() for _k in
+                       ("finger", "knuckle", "grip"))
+            }
+        except Exception as _je:
+            _probe["all_gripper_joints_rad_closed"] = f"ERR {_je}"
         _probe["ee_world_m"] = ee_world
         _probe["pad_actual_fk_m"] = pad_pos.tolist()
         _probe["gui_target_m"] = gui_target
         _probe["TOOL_OFFSET_Z_used_m"] = TOOL_OFFSET_Z
+
+        # ---- IS THE TOOL ACTUALLY PERPENDICULAR TO THE ROD? -----------------
+        # Measured directly from the joints, NOT from pad_pose_from_joints()
+        # (whose frame is wrong). Reports the commanded vs reached orientation
+        # and how far each tool axis is from its intended world axis. A tilt seen
+        # while looking ALONG the squeeze axis is a rotation about world X and
+        # CANNOT come from the finger swing -> it must be tool orientation.
+        try:
+            _q_now = robot.get_joint_positions()[ai].copy()
+            _p_b, _q_b = fk(_q_now)                       # EE pose in BASE frame
+            _R_ee_w = rotmat(ROBOT_WORLD_QUAT_WXYZ) @ rotmat(_q_b)   # -> WORLD
+            _R_cmd  = rotmat(ROBOT_WORLD_QUAT_WXYZ) @ rotmat(tq)     # commanded
+            _probe["ee_quat_base_reached_wxyz"] = [float(v) for v in _q_b]
+            _probe["ee_quat_base_commanded_wxyz"] = [float(v) for v in tq]
+            _probe["tool_axes_world"] = {
+                "tool_x": [round(float(v), 5) for v in _R_ee_w[:, 0]],
+                "tool_y": [round(float(v), 5) for v in _R_ee_w[:, 1]],
+                "tool_z": [round(float(v), 5) for v in _R_ee_w[:, 2]],
+            }
+            # total orientation error, reached vs commanded
+            _dR = _R_ee_w.T @ _R_cmd
+            _ang = float(np.degrees(np.arccos(
+                np.clip((np.trace(_dR) - 1.0) * 0.5, -1.0, 1.0))))
+            _probe["orientation_error_vs_commanded_deg"] = round(_ang, 4)
+            # the rod is vertical (world Z). the tool axis that should be
+            # PARALLEL to the rod is the one the fingers run along.
+            for _nm, _v in (("tool_x", _R_ee_w[:, 0]), ("tool_y", _R_ee_w[:, 1]),
+                            ("tool_z", _R_ee_w[:, 2])):
+                _tilt = float(np.degrees(np.arccos(np.clip(abs(_v[2]), -1.0, 1.0))))
+                _probe[f"{_nm}_angle_from_world_Z_deg"] = round(_tilt, 4)
+        except Exception as _oe:
+            _probe["orientation_measure_error"] = str(_oe)
+
+        # ---- LIVE PAD POSE: is the Case live, and the measured EE->pad offset --
+        # THIS writes the TSF_*_CASE_is_live / EE_to_pad fields the calibration
+        # reads. Without it, calibration finds nothing and falls back.
+        try:
+            def _cw(grip, name):
+                v = _probe.get(grip, {}).get(name, {}).get("UsdGeom.XformCache")
+                return np.array(v, dtype=float) if isinstance(v, list) else None
+            _eew = np.array(ee_world, dtype=float)
+            for _side in ("TSF_right_CASE", "TSF_left_CASE"):
+                _op, _cl = _cw("open_grip", _side), _cw("closed_grip", _side)
+                if _cl is None:
+                    _probe[f"{_side}_status"] = "prim not found / no xform"
+                    continue
+                _probe[f"{_side}_closed_world_mm"] = (_cl*1000).round(3).tolist()
+                _probe[f"{_side}_EE_to_pad_mm"]   = ((_cl - _eew)*1000).round(3).tolist()
+                if _op is not None:
+                    _d = (_cl - _op)*1000
+                    _probe[f"{_side}_moved_open_to_closed_mm"] = _d.round(3).tolist()
+                    _probe[f"{_side}_is_live"] = bool(np.max(np.abs(_d)) > 0.5)
+        except Exception as _pe:
+            _probe["ee_to_pad_measure_error"] = str(_pe)
+
+        # ---- MEASURED palm clearance + object movement ----------------------
+        # Answers two things by measurement instead of estimate:
+        #  1) how far above the pad the PALM really sits (my 110mm was a guess),
+        #  2) whether the ROD actually moved/leaned during the grasp (the 2F-85
+        #     has ONE drive joint, so both fingers move symmetrically about the
+        #     gripper centreline -- they CANNOT self-centre. Any rod offset ->
+        #     one pad crushed, the other untouched, at ANY close angle.)
+        try:
+            def _z(grip, name):
+                v = _probe.get(grip, {}).get(name, {}).get("UsdGeom.XformCache")
+                return float(v[2]) if isinstance(v, list) else None
+            def _xyz(grip, name):
+                v = _probe.get(grip, {}).get(name, {}).get("UsdGeom.XformCache")
+                return [float(c) for c in v] if isinstance(v, list) else None
+
+            _palm_z = _z("closed_grip", "gripper_base_link")
+            _pad_z  = float(gui_target[2])
+            if _palm_z is not None:
+                _probe["measured_palm_above_pad_mm"] = round((_palm_z - _pad_z) * 1000, 1)
+                _rod_len_m = float(CONFIG["object"].get("length_mm", 140.0)) / 1000.0
+                _rod_top_m = OBJ_CENTER[2] + _rod_len_m / 2.0
+                _probe["rod_top_world_m"] = round(_rod_top_m, 4)
+                _probe["measured_palm_clearance_mm"] = round((_palm_z - _rod_top_m) * 1000, 1)
+                _probe["palm_strikes_rod"] = bool(_palm_z < _rod_top_m)
+
+
+            _o_open  = _xyz("open_grip",   "object")
+            _o_close = _xyz("closed_grip", "object")
+            if _o_open and _o_close:
+                _d = [round((_o_close[i] - _o_open[i]) * 1000, 2) for i in range(3)]
+                _probe["object_moved_during_close_mm"] = _d
+                _probe["object_moved"] = bool(max(abs(v) for v in _d) > 0.5)
+        except Exception as _me:
+            _probe["clearance_measure_error"] = str(_me)
 
         # ---- OFFSET SOLVER --------------------------------------------------
         # We command  EE_z = pad_target_z + TOOL_OFFSET_Z, and the pad ends up
@@ -949,9 +1706,32 @@ try:
     _n_pts = len(GRID_POINTS)
     print(f"[cfg] POINT_TO_POINT = {POINT_TO_POINT} "
           f"({'pad-to-pad between points, no lift' if POINT_TO_POINT else 'old lift+descend per point'})")
+
+    # ---- REACHABILITY PRE-CHECK (before any motion) ----
+    _reach = {}
+    if REACH_CHECK or REACH_ONLY:
+        _q_home = robot.get_joint_positions()[ai].copy()
+        _reach = precheck_reachability(GRID_POINTS, _q_home)
+        if REACH_ONLY:
+            print("[reach] GRASP_REACH_ONLY=1 -> report written, no motion. Exiting.")
+            sys.exit(0)          # the finally: below still closes Isaac cleanly
+        _bad = [i for i, v in _reach.items() if not v]
+        if _bad and REACH_SKIP:
+            print(f"[reach] {len(_bad)} point(s) will be SKIPPED: "
+                  f"{['pt%02d' % i for i in _bad]}")
+        elif _bad:
+            print(f"[reach] {len(_bad)} unreachable, but GRASP_REACH_SKIP=0 -> "
+                  f"attempting anyway.")
+
     for _i, gp in enumerate(GRID_POINTS):
         tag = f"pt{gp['index']:02d}"
         gw  = np.array(gp["world"])
+        # reachability pre-check said no -> skip (already logged in the report)
+        if REACH_SKIP and (gp["index"] in _reach) and not _reach[gp["index"]]:
+            print(f"\n========== {tag}  SKIPPED (unreachable — see "
+                  f"reachability_report.json) ==========")
+            _prev_ok = False          # next point must re-approach from wherever we are
+            continue
         # first point: approach from home the old way. after a good grasp: go
         # straight to the next pad pose. only the last point retreats.
         _direct  = bool(POINT_TO_POINT and _i > 0 and _prev_ok)
@@ -978,6 +1758,166 @@ try:
         pass
     print(f"\n[cfg] DONE. {n_ok}/{len(GRID_POINTS)} grasps OK. Data in {OUTPUT_DIR}")
     print(f"[cfg] pose_history.json written ({len(pose_hist)} poses).")
+
+    # ---- CALIBRATE mode: store the MEASURED live-pad offset ----------------
+    # New method: read the LIVE sensor Case poses (proven live) and store the
+    # real EE->pad offset. The grasp CENTRE is the midpoint of the two pads; its
+    # world offset from the EE is what commanding subtracts. For a symmetric
+    # tool-down grasp the x,y of that midpoint offset are ~0, so the scalar
+    # TOOL_OFFSET_Z = -offset_z drives the grid unchanged -- but now MEASURED,
+    # at a CLEAN (collision-free) grasp, instead of the C_ANCHOR guess.
+    # If the Case is not live (older scene), fall back to the old formula so
+    # calibration never silently fails.
+    if CALIBRATE:
+        try:
+            with open(os.path.join(OUTPUT_DIR, "pad_truth_probe.json")) as _pf:
+                _pt = _json.load(_pf)
+            _ee = np.array(_pt["ee_world_m"], dtype=float)
+
+            # ---- CONTACT GATE: did the pads actually touch the object? --------
+            # The pad pose reads 'live' even when closing on AIR (the fingers
+            # still swing). The only true contact signal is the tactile sum
+            # rising (the Roberge-paper test). Read the pt00 tactile peak for
+            # BOTH sensors; if neither rises above threshold, REFUSE to store.
+            CONTACT_MIN_SUM = 1000.0   # baseline ~250, real contact ~6000
+            def _tactile_peak(sensor):
+                fn = os.path.join(OUTPUT_DIR, f"{BASENAME}_pt00_{sensor}_tactile_maps.csv")
+                if not os.path.exists(fn):
+                    fn = os.path.join(OUTPUT_DIR, f"{BASENAME}_{sensor}_tactile_maps.csv")
+                if not os.path.exists(fn):
+                    return None
+                peak = 0.0
+                try:
+                    with open(fn) as _tf:
+                        _r = _csv.reader(_tf); next(_r)
+                        for _row in _r:
+                            try:
+                                peak = max(peak, sum(float(x) for x in _row[2:30]))
+                            except Exception:
+                                pass
+                except Exception:
+                    return None
+                return peak
+            _pk1, _pk2 = _tactile_peak("s1"), _tactile_peak("s2")
+            _peak = max([v for v in (_pk1, _pk2) if v is not None] or [0.0])
+            _contact = _peak >= CONTACT_MIN_SUM
+            print(f"[cal] contact check: tactile peak s1={_pk1} s2={_pk2} "
+                  f"-> {'CONTACT' if _contact else 'NO CONTACT'} (thr {CONTACT_MIN_SUM})")
+            if not _contact:
+                print(f"\n[cal] REFUSING TO STORE: the pads did NOT contact the object "
+                      f"(tactile peak {_peak:.0f} < {CONTACT_MIN_SUM:.0f}).")
+                print(f"[cal] The grasp closed on air — move the pad ONTO the rod body "
+                      f"(a Z on the object, not past its end) and calibrate again.")
+                print(f"[cal] Nothing was written; the previous calibration (if any) is kept.")
+                EXIT_CODE = 4
+                raise _CalNoContact()   # skip the store below
+
+            # ---- PEAK BAND CHECK ------------------------------------------
+            # Contact alone is not enough: CLOSE_RAD on a NEW diameter is a
+            # hand estimate, and a bad one still makes contact — just far too
+            # light or hard enough to crush. Either way the pad face ends up
+            # at the wrong height, so the TOOL_OFFSET_Z we are about to store
+            # would be wrong AND the bad close_rad would be silently reused
+            # for every future run. Compare against the verified 26 mm grasp.
+            _ref = 13201.0
+            try:
+                _ref = float(_CAL.get("26.0", {}).get("tactile_peak_sum", _ref))
+            except Exception:
+                pass
+            _lo, _hi = 0.5 * _ref, 2.0 * _ref
+            if not (_lo <= _peak <= _hi) and os.environ.get("GRASP_CAL_FORCE") != "1":
+                _too_light = _peak < _lo
+                # span ~= 85 - 106*rad (mm), so 0.01 rad ~= 1.06 mm of squeeze
+                _step = 0.03 if abs(_peak - _ref) > _ref else 0.015
+                _sugg = CLOSE_RAD + (_step if _too_light else -_step)
+                print(f"\n[cal] REFUSING TO STORE: tactile peak {_peak:.0f} is "
+                      f"{'TOO LOW' if _too_light else 'TOO HIGH'} — outside the "
+                      f"sane band {_lo:.0f}..{_hi:.0f} (26 mm reference {_ref:.0f}).")
+                print(f"[cal] CLOSE_RAD = {CLOSE_RAD:.4f} rad "
+                      f"{'barely touches' if _too_light else 'over-compresses'} "
+                      f"the {OBJ_DIAM_MM:.1f} mm object.")
+                print(f"[cal] Re-run calibrate with "
+                      f"GRASP_CLOSE_RAD={_sugg:.3f}  "
+                      f"({'+' if _too_light else '-'}{_step:.3f} rad = "
+                      f"{'+' if _too_light else '-'}{_step*106:.1f} mm of squeeze).")
+                print(f"[cal] Nothing was written; the previous calibration "
+                      f"(if any) is kept.  Override with GRASP_CAL_FORCE=1.")
+                EXIT_CODE = 5
+                raise _CalNoContact()   # skip the store below
+
+            # ---- OBJECT MUST NOT HAVE MOVED -------------------------------
+            # If the rod shifted during the calibrate grasp, the pad pose we
+            # are about to measure belongs to a geometry that no longer holds.
+            if _pt.get("object_moved") is True and os.environ.get("GRASP_CAL_FORCE") != "1":
+                _mv = _pt.get("object_moved_during_close_mm")
+                print(f"\n[cal] REFUSING TO STORE: the object MOVED during the "
+                      f"calibrate grasp ({_mv} mm).")
+                print(f"[cal] The measured pad pose does not correspond to a "
+                      f"stable object. Check the fixed joint / supports, then "
+                      f"calibrate again.  Override with GRASP_CAL_FORCE=1.")
+                EXIT_CODE = 6
+                raise _CalNoContact()
+
+            def _case_closed(side):
+                v = _pt.get("closed_grip", {}).get(side, {}).get("UsdGeom.XformCache")
+                return np.array(v, dtype=float) if isinstance(v, list) else None
+            _pr = _case_closed("TSF_right_CASE")
+            _pl = _case_closed("TSF_left_CASE")
+            _live = (_pt.get("TSF_right_CASE_is_live") is True and
+                     _pt.get("TSF_left_CASE_is_live") is True and
+                     _pr is not None and _pl is not None)
+
+            if _live:
+                _pad_mid   = 0.5 * (_pr + _pl)              # grasp centre = CASE ORIGIN (world)
+                _off_world = _pad_mid - _ee                 # EE -> case-origin (world)
+                _off_case  = round(float(-_off_world[2]), 5)               # case origin
+                # shift UP to the pad CENTRE (Case origin is at the pad's end):
+                _offset    = round(_off_case + PAD_CENTER_ABOVE_CASE_M, 5)  # pad CENTRE
+                _CAL[_diam_key] = {
+                    "diameter_mm": OBJ_DIAM_MM,
+                    "method": "measured_live_pad",
+                    "TOOL_OFFSET_Z": _offset,                 # targets pad CENTRE (m)
+                    "TOOL_OFFSET_Z_case_origin": _off_case,   # raw, targets Case origin
+                    "pad_center_above_case_m": PAD_CENTER_ABOVE_CASE_M,
+                    "ee_to_grasp_center_offset_world_m": [round(float(v), 5) for v in _off_world],
+                    "ee_to_pad_right_world_m": [round(float(v), 5) for v in (_pr - _ee)],
+                    "ee_to_pad_left_world_m":  [round(float(v), 5) for v in (_pl - _ee)],
+                    "pad_right_closed_world_m": [round(float(v), 5) for v in _pr],
+                    "pad_left_closed_world_m":  [round(float(v), 5) for v in _pl],
+                    "ee_world_m": [round(float(v), 5) for v in _ee],
+                    "close_rad": CLOSE_RAD,
+                    "finger_joint_rad": _pt.get("finger_joint_rad"),
+                    "tactile_peak_sum": round(float(_peak), 1),
+                    "measured_at": _stamp,
+                }
+                print(f"\n[cal] CALIBRATED (measured live pad) diameter {OBJ_DIAM_MM} mm")
+                print(f"[cal]   case-origin offset = {_off_case}  + pad-centre shift "
+                      f"{PAD_CENTER_ABOVE_CASE_M} -> TOOL_OFFSET_Z = {_offset}")
+                print(f"[cal]   EE->grasp-centre offset (world mm) = "
+                      f"{(_off_world*1000).round(2).tolist()}")
+                print(f"[cal]   TOOL_OFFSET_Z (scalar, m)          = {_offset}")
+            else:
+                # ---- fallback: old inner-finger + C_ANCHOR formula ----
+                _link_z = float(_pt["closed_grip"]["right_inner_finger"]["UsdGeom.XformCache"][2])
+                _offset = round((float(_ee[2]) - _link_z) + C_ANCHOR, 5)
+                _CAL[_diam_key] = {
+                    "diameter_mm": OBJ_DIAM_MM, "method": "fallback_C_ANCHOR",
+                    "TOOL_OFFSET_Z": _offset, "ee_z": round(float(_ee[2]), 5),
+                    "closed_inner_finger_z": round(_link_z, 5), "C_ANCHOR": C_ANCHOR,
+                    "close_rad": CLOSE_RAD, "measured_at": _stamp,
+                }
+                print(f"\n[cal] Case NOT live -> FALLBACK formula. "
+                      f"diameter {OBJ_DIAM_MM} mm -> TOOL_OFFSET_Z = {_offset}")
+
+            os.makedirs(os.path.dirname(CAL_FILE), exist_ok=True)
+            with open(CAL_FILE, "w") as _cf:
+                _json.dump(_CAL, _cf, indent=2)
+            print(f"[cal] stored in {CAL_FILE}")
+        except _CalNoContact:
+            pass    # already printed the reason; nothing stored, EXIT_CODE set
+        except Exception as _ce:
+            print(f"[cal] CALIBRATION FAILED to compute/store: {_ce}")
+            EXIT_CODE = 3
 finally:
     print("[cfg] holding window 5s before close...")
     for _ in range(5 * 60):

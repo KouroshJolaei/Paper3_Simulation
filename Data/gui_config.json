@@ -5,129 +5,31 @@
       199.0,
       1052.2
     ],
-    "tilt_deg": 20.0,
+    "tilt_deg": 0.0,
     "tilt_axis": "X",
     "shape": "cylinder",
     "diameter_mm": 26.0,
     "length_mm": 140.0
   },
   "pad": {
-    "base_offset_y_mm": -16.4,
+    "base_offset_y_mm": 0.0,
     "base_offset_z_mm": 30.0,
-    "x_fixed_centered": true
+    "x_fixed_centered": true,
+    "rotation_deg": 20.0,
+    "rotation_axis": "y"
   },
   "grid": {
     "nx": 1,
-    "ny": 3,
-    "step_mm": 5.5,
-    "centered": true,
-    "n_points": 21
+    "ny": 1,
+    "step_mm": 8.0,
+    "centered": false,
+    "n_points": 1
   },
   "points": [
     {
       "index": 0,
-      "pad_offset_y_mm": -16.4,
+      "pad_offset_y_mm": 0.0,
       "pad_offset_z_mm": 30.0
-    },
-    {
-      "index": 1,
-      "pad_offset_y_mm": -32.9,
-      "pad_offset_z_mm": 24.5
-    },
-    {
-      "index": 2,
-      "pad_offset_y_mm": -32.9,
-      "pad_offset_z_mm": 30.0
-    },
-    {
-      "index": 3,
-      "pad_offset_y_mm": -32.9,
-      "pad_offset_z_mm": 35.5
-    },
-    {
-      "index": 4,
-      "pad_offset_y_mm": -27.4,
-      "pad_offset_z_mm": 35.5
-    },
-    {
-      "index": 5,
-      "pad_offset_y_mm": -27.4,
-      "pad_offset_z_mm": 30.0
-    },
-    {
-      "index": 6,
-      "pad_offset_y_mm": -27.4,
-      "pad_offset_z_mm": 24.5
-    },
-    {
-      "index": 7,
-      "pad_offset_y_mm": -21.9,
-      "pad_offset_z_mm": 24.5
-    },
-    {
-      "index": 8,
-      "pad_offset_y_mm": -21.9,
-      "pad_offset_z_mm": 30.0
-    },
-    {
-      "index": 9,
-      "pad_offset_y_mm": -21.9,
-      "pad_offset_z_mm": 35.5
-    },
-    {
-      "index": 10,
-      "pad_offset_y_mm": -16.4,
-      "pad_offset_z_mm": 35.5
-    },
-    {
-      "index": 11,
-      "pad_offset_y_mm": -16.4,
-      "pad_offset_z_mm": 24.5
-    },
-    {
-      "index": 12,
-      "pad_offset_y_mm": -10.899999999999999,
-      "pad_offset_z_mm": 24.5
-    },
-    {
-      "index": 13,
-      "pad_offset_y_mm": -10.899999999999999,
-      "pad_offset_z_mm": 30.0
-    },
-    {
-      "index": 14,
-      "pad_offset_y_mm": -10.899999999999999,
-      "pad_offset_z_mm": 35.5
-    },
-    {
-      "index": 15,
-      "pad_offset_y_mm": -5.399999999999999,
-      "pad_offset_z_mm": 35.5
-    },
-    {
-      "index": 16,
-      "pad_offset_y_mm": -5.399999999999999,
-      "pad_offset_z_mm": 30.0
-    },
-    {
-      "index": 17,
-      "pad_offset_y_mm": -5.399999999999999,
-      "pad_offset_z_mm": 24.5
-    },
-    {
-      "index": 18,
-      "pad_offset_y_mm": 0.10000000000000142,
-      "pad_offset_z_mm": 24.5
-    },
-    {
-      "index": 19,
-      "pad_offset_y_mm": 0.10000000000000142,
-      "pad_offset_z_mm": 30.0
-    },
-    {
-      "index": 20,
-      "pad_offset_y_mm": 0.10000000000000142,
-      "pad_offset_z_mm": 35.5
     }
   ]
 }

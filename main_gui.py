@@ -36,8 +36,12 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 # ---- real hardware sizes (mm) ----
 PAD_W = 22.0    # pad short side (4 taxels)
 PAD_H = 37.0    # pad long side  (7 taxels)
-CYL_D = 26.0    # cylinder diameter
-CYL_L = 140.0   # cylinder length
+# Object size. These stay module-level because ~18 places read them, but they
+# are now REFRESHED FROM THE GUI on every cfg() call (see _sync_object_size).
+# The scene's Object_02/Cylinder is a UNIT mesh scaled by the collector, so a
+# new diameter needs no new USD and no STL — just these numbers.
+CYL_D = 26.0    # cylinder diameter (mm) — live, set by the Object size field
+CYL_L = 140.0   # cylinder length   (mm) — live, set by the Object size field
 GRIP_OPEN = 12.0  # half-gap of each pad from the cylinder rim before closing (mm, visual)
 ROBOT_BASE_MM = np.array([20.93, -337.5, 992.75])  # robot base_link world (mm)
 
@@ -111,11 +115,18 @@ class CockpitGUI:
             "obj_x": tk.StringVar(value="-268.06"),
             "obj_y": tk.StringVar(value="199.0"),
             "obj_z": tk.StringVar(value="1052.2"),
+            "obj_diam": tk.StringVar(value="26.0"),         # object diameter mm
+            "obj_len": tk.StringVar(value="140.0"),         # object length   mm
             "obj_tilt_deg": tk.StringVar(value="0.0"),      # 0 = standing
             "obj_tilt_axis": tk.StringVar(value="X"),       # tilt about this axis
             # pad pose = offset from OBJECT CENTER (mm). X is fixed (centered grasp).
             "pad_dy": tk.StringVar(value="0.0"),
             "pad_dz": tk.StringVar(value="0.0"),
+            # In-plane ROLL of the pad about its own face normal (deg).
+            # Emitted as GRASP_ROT_DEG; the collector applies it about the
+            # TOOL-LOCAL Y axis (verified 2026-08-03: Y rolls the pad in its
+            # face plane; X tips the gripper off the rod).
+            "pad_rot": tk.StringVar(value="0.0"),
             "grid_nx":  tk.StringVar(value="2"),
             "grid_ny":  tk.StringVar(value="3"),
             "grid_step": tk.StringVar(value="8.0"),   # mm
@@ -124,6 +135,9 @@ class CockpitGUI:
             "headless": tk.BooleanVar(value=False),   # False = show Isaac window
             "calib_headless": tk.BooleanVar(value=False),  # Calibrate tab headless toggle
             "calib_dz": tk.StringVar(value="0.0"),  # Calibrate pad Z offset (Y stays centered)
+            # finger-joint angle to squeeze to during calibration.
+            # blank = let the collector decide (stored value, else 26 mm value)
+            "calib_close_rad": tk.StringVar(value=""),
             "stitch_want_gsr": tk.BooleanVar(value=False),  # Stitch-tab: include GSR in validation
         }
 
@@ -146,8 +160,48 @@ class CockpitGUI:
         self.refresh()
 
     def _build_inputs(self):
-        frm = ttk.Frame(self.tab_collect, padding=10)
-        frm.grid(row=0, column=0, sticky="ns")
+        # The left panel grew past the window height and had no way to reach
+        # the buttons at the bottom. Put it inside a Canvas with a vertical
+        # scrollbar: the panel keeps its natural width, only scrolls in Y.
+        _outer = ttk.Frame(self.tab_collect)
+        _outer.grid(row=0, column=0, sticky="nsew")
+        _outer.rowconfigure(0, weight=1)
+        _outer.columnconfigure(0, weight=1)
+
+        _cv = tk.Canvas(_outer, highlightthickness=0, borderwidth=0)
+        _sb = ttk.Scrollbar(_outer, orient="vertical", command=_cv.yview)
+        _cv.configure(yscrollcommand=_sb.set)
+        _cv.grid(row=0, column=0, sticky="nsew")
+        _sb.grid(row=0, column=1, sticky="ns")
+
+        frm = ttk.Frame(_cv, padding=10)
+        _cv.create_window((0, 0), window=frm, anchor="nw")
+
+        def _fit(_e=None):
+            _cv.configure(scrollregion=_cv.bbox("all"))
+            # never clip horizontally: canvas matches the panel's needed width
+            _cv.configure(width=frm.winfo_reqwidth())
+        frm.bind("<Configure>", _fit)
+
+        def _wheel(e):
+            if getattr(e, "num", None) == 4 or getattr(e, "delta", 0) > 0:
+                _cv.yview_scroll(-1, "units")
+            elif getattr(e, "num", None) == 5 or getattr(e, "delta", 0) < 0:
+                _cv.yview_scroll(1, "units")
+
+        def _grab(_e=None):        # only while the pointer is over this panel,
+            for _b in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                _cv.bind_all(_b, _wheel)
+
+        def _release(_e=None):     # so the plot area keeps its own wheel
+            for _b in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                _cv.unbind_all(_b)
+
+        for _w in (_cv, frm):
+            _w.bind("<Enter>", _grab)
+            _w.bind("<Leave>", _release)
+
+        self._inputs_canvas = _cv          # kept for later resizing
         r = 0
 
         ttk.Label(frm, text="OBJECT pose (world, mm)",
@@ -157,6 +211,15 @@ class CockpitGUI:
             e = ttk.Entry(frm, textvariable=self.vars[key], width=12)
             e.grid(row=r, column=1, sticky="w"); e.bind("<Return>", lambda ev: self.refresh()); r += 1
         ttk.Label(frm, text="tilt (deg)").grid(row=r, column=0, sticky="e")
+        for key, lab in [("obj_diam", "diameter (mm)"), ("obj_len", "length (mm)")]:
+            ttk.Label(frm, text=lab).grid(row=r, column=0, sticky="e")
+            e = ttk.Entry(frm, textvariable=self.vars[key], width=12)
+            e.grid(row=r, column=1, sticky="w")
+            e.bind("<Return>", lambda ev: self.refresh()); r += 1
+        self.obj_cal_lbl = ttk.Label(frm, text="", foreground="#555",
+                                     wraplength=250)
+        self.obj_cal_lbl.grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
+
         e = ttk.Entry(frm, textvariable=self.vars["obj_tilt_deg"], width=12)
         e.grid(row=r, column=1, sticky="w"); e.bind("<Return>", lambda ev: self.refresh()); r += 1
         ttk.Label(frm, text="tilt axis").grid(row=r, column=0, sticky="e")
@@ -178,7 +241,10 @@ class CockpitGUI:
             e = ttk.Entry(frm, textvariable=self.vars[key], width=12)
             e.grid(row=r, column=1, sticky="w"); e.bind("<Return>", lambda ev: self.refresh()); r += 1
         ttk.Label(frm, text="rotation (deg)").grid(row=r, column=0, sticky="e")
-        ttk.Entry(frm, width=12, state="disabled").grid(row=r, column=1, sticky="w"); r += 1
+        e = ttk.Entry(frm, textvariable=self.vars["pad_rot"], width=12)
+        e.grid(row=r, column=1, sticky="w"); e.bind("<Return>", lambda ev: self.refresh()); r += 1
+        ttk.Label(frm, text="(pad roll in its own face plane; tool-local Y)",
+                  foreground="#888").grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
 
         ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=2, sticky="ew", pady=8); r += 1
 
@@ -302,6 +368,7 @@ class CockpitGUI:
             except Exception:
                 return default
         try:
+            self._sync_object_size(fnum)
             obj = np.array([fnum("obj_x"), fnum("obj_y"), fnum("obj_z")])
             pad = obj + np.array([0.0, fnum("pad_dy"), fnum("pad_dz")])
             return {
@@ -311,6 +378,7 @@ class CockpitGUI:
                 "pad": pad,
                 "pad_dy": fnum("pad_dy"),
                 "pad_dz": fnum("pad_dz"),
+                "pad_rot": fnum("pad_rot"),
                 "nx": inum("grid_nx"),
                 "ny": inum("grid_ny"),
                 "step": fnum("grid_step", 1.0),
@@ -337,8 +405,12 @@ class CockpitGUI:
                      + ("  (centered: n = per side)" if cfg["centered"]
                         else "  (anchored at pad offset)")
                      + f"   ~{len(offs) * 2.5:.0f} min"
-                     + f"   max jump {_mx:.1f} mm",
-                foreground=("#b00" if _mx > 15.0 else "#555"))
+                     + f"   max jump {_mx:.1f} mm"
+                     + ("   ⚠ pad rolled: grid still steps in world Y/Z"
+                        if (abs(cfg["pad_rot"]) > 1e-6 and len(offs) > 1) else ""),
+                foreground=("#b00" if (_mx > 15.0
+                                       or (abs(cfg["pad_rot"]) > 1e-6
+                                           and len(offs) > 1)) else "#555"))
 
         # ---------- TOP-DOWN (X-Y): two pads squeezing the cylinder along X ----------
         ax = self.ax_top; ax.clear()
@@ -352,13 +424,17 @@ class CockpitGUI:
         # two pads on -X and +X sides, tangent to the rim (+ small opening gap).
         # In top-down the pad's SHORT side (width, across Y) is visible as a line.
         rim = CYL_D/2 + GRIP_OPEN
+        # A pad rolled by theta about its own face normal still lies in the same
+        # plane, but its shadow along Y grows: W*|cos| + H*|sin|.
+        _pr = np.radians(cfg["pad_rot"])
+        half_y = (PAD_W*abs(np.cos(_pr)) + PAD_H*abs(np.sin(_pr))) / 2.0
         for gx, gy in offs:
             cy = pad[1] + gy    # the grid's Y offset shifts pads along Y
             # -X pad
-            ax.plot([obj[0]-rim, obj[0]-rim], [cy-PAD_W/2, cy+PAD_W/2],
+            ax.plot([obj[0]-rim, obj[0]-rim], [cy-half_y, cy+half_y],
                     color="crimson", linewidth=3)
             # +X pad
-            ax.plot([obj[0]+rim, obj[0]+rim], [cy-PAD_W/2, cy+PAD_W/2],
+            ax.plot([obj[0]+rim, obj[0]+rim], [cy-half_y, cy+half_y],
                     color="darkorange", linewidth=3)
         ax.plot([], [], color="crimson", linewidth=3, label="pad -X (s1)")
         ax.plot([], [], color="darkorange", linewidth=3, label="pad +X (s2)")
@@ -404,9 +480,24 @@ class CockpitGUI:
                 col, ls = "crimson", "-"
                 lab = "pad" if not _lbl_done["raw"] else None
                 _lbl_done["raw"] = True
-            ax.add_patch(mpatches.Rectangle((py, pz), PAD_W, PAD_H, fill=False,
-                                            edgecolor=col, linewidth=1.5,
-                                            linestyle=ls, label=lab))
+            if abs(cfg["pad_rot"]) < 1e-6:
+                ax.add_patch(mpatches.Rectangle((py, pz), PAD_W, PAD_H,
+                                                fill=False, edgecolor=col,
+                                                linewidth=1.5, linestyle=ls,
+                                                label=lab))
+            else:
+                # Rotate the footprint about the PAD CENTRE, not a corner.
+                # Drawn as a Polygon so this works on any matplotlib version
+                # (Rectangle's rotation_point= needs >= 3.6).
+                _cy, _cz = pad[1] + gy, pad[2] + gx
+                _k = np.array([[-PAD_W/2, -PAD_H/2], [ PAD_W/2, -PAD_H/2],
+                               [ PAD_W/2,  PAD_H/2], [-PAD_W/2,  PAD_H/2]])
+                _c, _s = np.cos(_pr), np.sin(_pr)
+                _kr = _k @ np.array([[_c, _s], [-_s, _c]])
+                ax.add_patch(mpatches.Polygon(_kr + [_cy, _cz], closed=True,
+                                              fill=False, edgecolor=col,
+                                              linewidth=1.5, linestyle=ls,
+                                              label=lab))
             ax.scatter(pad[1]+gy, pad[2]+gx, color=col, s=10)
         # visit path: the exact order the collector executes (pt00 -> last)
         if len(offs) > 1:
@@ -570,6 +661,10 @@ class CockpitGUI:
                 "base_offset_y_mm": cfg["pad_dy"],
                 "base_offset_z_mm": cfg["pad_dz"],
                 "x_fixed_centered": True,
+                # Documentation only — the collector reads the roll from
+                # GRASP_ROT_DEG / GRASP_ROT_AXIS, not from this file.
+                "rotation_deg": cfg["pad_rot"],
+                "rotation_axis": "y",
             },
             "grid": {
                 "nx": cfg["nx"], "ny": cfg["ny"], "step_mm": cfg["step"],
@@ -645,12 +740,15 @@ class CockpitGUI:
             return
         # the exact, proven terminal command (this is what worked for you)
         headless = "1" if self.vars["headless"].get() else "0"
+        _rot = cfg.get("pad", {}).get("rotation_deg", 0.0)
         cmd = (
             f"cd {EXAMPLES_DIR} && \\\n"
             f'GRASP_OUTPUT_DIR="$HOME/Paper3_Simulation/Data/gui_run" \\\n'
             f'GRASP_BASENAME="gui" \\\n'
             f'GRASP_HEADLESS="{headless}" \\\n'
-            f"{ISAAC_PY} {COLLECT_PY} \\\n"
+            + (f'GRASP_ROT_DEG="{_rot:g}" \\\n'
+               f'GRASP_ROT_AXIS="y" \\\n' if abs(_rot) > 1e-6 else "")
+            + f"{ISAAC_PY} {COLLECT_PY} \\\n"
             f"  --config {CONFIG_JSON}"
         )
         # pop a window with the command, selectable + a Copy button
@@ -676,13 +774,16 @@ class CockpitGUI:
         if cfg is None:
             return
         headless = "1" if self.vars["headless"].get() else "0"
+        _rot = cfg.get("pad", {}).get("rotation_deg", 0.0)
         cmd = (
             f"cd {EXAMPLES_DIR} && \\\n"
             f'GRASP_OUTPUT_DIR="$HOME/Paper3_Simulation/Data/gui_run" \\\n'
             f'GRASP_BASENAME="reach" \\\n'
             f'GRASP_HEADLESS="{headless}" \\\n'
             f'GRASP_REACH_ONLY="1" \\\n'
-            f"{ISAAC_PY} {COLLECT_PY} \\\n"
+            + (f'GRASP_ROT_DEG="{_rot:g}" \\\n'
+               f'GRASP_ROT_AXIS="y" \\\n' if abs(_rot) > 1e-6 else "")
+            + f"{ISAAC_PY} {COLLECT_PY} \\\n"
             f"  --config {CONFIG_JSON}"
         )
         win = tk.Toplevel(self.root)
@@ -750,6 +851,44 @@ class CockpitGUI:
         messagebox.showinfo("Reachability", f"{msg}\n\nreport:\n{path}")
 
     # ================= Calibrate tab =================
+    def _sync_object_size(self, fnum):
+        """Copy the GUI's diameter/length into the module-level CYL_D/CYL_L.
+
+        Everything downstream (preview, palm-clearance line, 3D scene,
+        reachability, the written config) already reads those two names, so
+        this one call makes the whole GUI follow the entry fields. Also warns
+        when the chosen diameter has no calibration yet -- the collector will
+        refuse to run in that case, and it is better to see it here."""
+        global CYL_D, CYL_L
+        d = fnum("obj_diam", 26.0)
+        L = fnum("obj_len", 140.0)
+        if d > 0:
+            CYL_D = d
+        if L > 0:
+            CYL_L = L
+        if not hasattr(self, "obj_cal_lbl"):
+            return
+        try:
+            with open(os.path.join(PROJECT, "Data",
+                                   "pad_offset_calibration.json")) as f:
+                cal = json.load(f)
+        except Exception:
+            cal = {}
+        ent = cal.get(f"{CYL_D:.1f}")
+        if ent:
+            self.obj_cal_lbl.config(
+                text=f"\u00d8{CYL_D:.1f} calibrated  "
+                     f"(TOOL_OFFSET_Z {ent.get('TOOL_OFFSET_Z')}, "
+                     f"close_rad {ent.get('close_rad')})",
+                foreground="#070")
+        else:
+            est = max(0.05, (85.0 - CYL_D) / 106.0)
+            self.obj_cal_lbl.config(
+                text=f"\u00d8{CYL_D:.1f} NOT calibrated - collection will "
+                     f"refuse. Calibrate tab first; try "
+                     f"GRASP_CLOSE_RAD={est:.3f}",
+                foreground="#b00")
+
     def _build_calib_tab(self):
         """Calibrate the pad Z-offset for the CURRENT object diameter. Closes the
         gripper on the object (centered) once, measures TOOL_OFFSET_Z, stores it.
@@ -779,6 +918,18 @@ class CockpitGUI:
         ttk.Label(frm, text="Z offset (up/down)").grid(row=r, column=0, sticky="e")
         e = ttk.Entry(frm, textvariable=self.vars["calib_dz"], width=10)
         e.grid(row=r, column=1, sticky="w"); e.bind("<Return>", lambda _e: self.refresh_calib()); r += 1
+
+        ttk.Label(frm, text="close_rad").grid(row=r, column=0, sticky="e")
+        e = ttk.Entry(frm, textvariable=self.vars["calib_close_rad"], width=10)
+        e.grid(row=r, column=1, sticky="w")
+        e.bind("<Return>", lambda _e: self.refresh_calib()); r += 1
+        self.calib_rad_lbl = ttk.Label(frm, text="", foreground="#555",
+                                       wraplength=250)
+        self.calib_rad_lbl.grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
+        ttk.Button(frm, text="Use estimate for this diameter",
+                   command=self._fill_close_rad_estimate).grid(
+            row=r, column=0, columnspan=2, sticky="ew", pady=(0, 6)); r += 1
+
         ttk.Label(frm, text="Y locked to center (needed for a valid diameter grip)",
                   foreground="#888", wraplength=250).grid(
             row=r, column=0, columnspan=2, sticky="w"); r += 1
@@ -818,6 +969,7 @@ class CockpitGUI:
 
     def refresh_calib(self):
         cfg = self._read()
+        self._update_close_rad_hint()
         ax = self.ax_calib; ax.clear()
         if cfg is None:
             ax.set_title("check numeric inputs"); self.canvas_calib.draw(); return
@@ -903,6 +1055,54 @@ class CockpitGUI:
             "calibrate": True,
         }
 
+    def close_rad_estimate(self, d_mm=None):
+        """Finger-joint angle that closes the 2F-85 to `d_mm`.
+
+        The jaw span is close to linear in the joint angle: fully open is
+        ~85 mm at ~0 rad, and the VERIFIED 26 mm grasp sits at 0.55 rad, so
+        span ~= 85 - 106*rad. This is a STARTING POINT, not a calibration —
+        the calibrate run checks the tactile peak against the 26 mm
+        reference and refuses to store anything outside a sane band."""
+        d = CYL_D if d_mm is None else float(d_mm)
+        return max(0.05, (85.0 - d) / 106.0)
+
+    def _fill_close_rad_estimate(self):
+        self.vars["calib_close_rad"].set(f"{self.close_rad_estimate():.3f}")
+        self.refresh_calib()
+
+    def _update_close_rad_hint(self):
+        """Show where close_rad will come from, and what it means in mm."""
+        if not hasattr(self, "calib_rad_lbl"):
+            return
+        txt = self.vars["calib_close_rad"].get().strip()
+        ent = self._cal_entry()
+        est = self.close_rad_estimate()
+        if txt:
+            try:
+                rad = float(txt)
+            except ValueError:
+                self.calib_rad_lbl.config(
+                    text="close_rad must be a number (or blank)",
+                    foreground="#b00")
+                return
+            span = 85.0 - 106.0 * rad
+            self.calib_rad_lbl.config(
+                text=f"squeezes to ~{span:.1f} mm span vs \u00d8{CYL_D:.1f} "
+                     f"object  ({CYL_D - span:+.1f} mm of squeeze). "
+                     f"Estimate for this diameter: {est:.3f}",
+                foreground=("#070" if 0.0 < (CYL_D - span) < 8.0 else "#b00"))
+        elif ent and ent.get("close_rad") is not None:
+            self.calib_rad_lbl.config(
+                text=f"blank -> collector uses the stored "
+                     f"{float(ent['close_rad']):.3f} rad for this diameter",
+                foreground="#555")
+        else:
+            self.calib_rad_lbl.config(
+                text=f"blank -> collector falls back to the 26 mm value "
+                     f"0.550 rad, which will MISS a \u00d8{CYL_D:.1f} object. "
+                     f"Use {est:.3f}",
+                foreground="#b00")
+
     def save_and_show_calib_cmd(self):
         cfg = self.build_calib_config()
         if cfg is None:
@@ -911,13 +1111,22 @@ class CockpitGUI:
         with open(CALIB_CONFIG_JSON, "w") as f:
             json.dump(cfg, f, indent=2)
         headless = "1" if self.vars["calib_headless"].get() else "0"
+        _crad = self.vars["calib_close_rad"].get().strip()
+        if _crad:
+            try:
+                float(_crad)
+            except ValueError:
+                messagebox.showerror("Calibrate",
+                                     "close_rad must be a number, or blank.")
+                return
         cmd = (
             f"cd {EXAMPLES_DIR} && \\\n"
             f'GRASP_OUTPUT_DIR="$HOME/Paper3_Simulation/Data/gui_run" \\\n'
             f'GRASP_BASENAME="calib" \\\n'
             f'GRASP_HEADLESS="{headless}" \\\n'
             f'GRASP_CALIBRATE="1" \\\n'
-            f"{ISAAC_PY} {COLLECT_PY} \\\n"
+            + (f'GRASP_CLOSE_RAD="{_crad}" \\\n' if _crad else "")
+            + f"{ISAAC_PY} {COLLECT_PY} \\\n"
             f"  --config {CALIB_CONFIG_JSON}"
         )
         win = tk.Toplevel(self.root)

@@ -48,13 +48,25 @@ PAD_W, PAD_H = 22.0, 37.0          # 4-taxel side (Y) , 7-taxel side (Z)
 N_ROWS, N_COLS = 7, 4
 PITCH_Y = PAD_W / N_COLS           # 5.50 mm
 PITCH_Z = PAD_H / N_ROWS           # 5.286 mm
-HOLD_FRAC = 0.5                    # hold-average window (project convention)
+HOLD_FRAC = 0.9                    # hold-average window, as a fraction of
+                                   # (peak - min). Raised from 0.5 on
+                                   # 2026-07-29: at 0.5 the window reached
+                                   # down to 62.6% of peak, i.e. into the
+                                   # closing ramp. Paper 2 averaged a fixed
+                                   # 1 s window taken entirely inside the
+                                   # steady grasp (network_gsr /
+                                   # tactile_DataReadSave3.run_average), so
+                                   # 0.9 (91.8-100% of peak) matches that
+                                   # convention. Costs 6 of 216 frames.
 OUTLIER_MM = 8.0                   # drop a grasp if recorded pose is >8mm
                                    # off its commanded pose (bad pose record)
 MIRROR_S2_IN_OVERLAY = False        # column 3: show s2 mirrored L-R, since
                                    # the two pads face each other (display only)
 BASE_FRAC = 0.05                   # frames with sum <= 5% of peak = baseline
-SUBTRACT_BASELINE = False          # OFF -> single-grasp stitch == raw heatmap
+SUBTRACT_BASELINE = True           # ON 2026-07-29: removes the pad-locked
+                                   # sensor floor (~1.3% of a map) and the
+                                   # unphysical negatives at the fade edge.
+                                   # Does NOT fix the row-gain spread (46->48%).
 
 # Which grasp is the INITIAL (input) frame for column 4 / the training pair.
 #   "first"  = lowest ptNN = where the sweep actually STARTED (honest figure)
@@ -141,6 +153,48 @@ def hold_average(csv_path):
     else:
         hold = v[hold_mask].mean(0)
     return hold.reshape(N_ROWS, N_COLS), int(hold_mask.sum()), peak
+
+
+def save_hold_averages(run_dir, verbose=True):
+    """Write every grasp's 28-number hold-average to ONE tidy CSV.
+
+    <run_dir>/hold_average_maps.csv — one row per grasp per sensor:
+        grasp, sensor, n_hold_frames, peak_sum, map_sum, hold_frac,
+        baseline_subtracted, t_r0c0 ... t_r6c3
+    Taxel columns are row-major with r0 = pad BOTTOM, matching the 7x4
+    array and the origin="lower" plots.
+
+    This is the exact map that gets heat-mapped and stitched — same
+    hold_average() call — so the file is the numeric ground truth behind
+    both figures, not a re-derivation."""
+    files = sorted(glob.glob(os.path.join(run_dir, "*_pt*_s1_tactile_maps.csv")))
+    if not files:
+        return None
+    cols = [f"t_r{r}c{c}" for r in range(N_ROWS) for c in range(N_COLS)]
+    rows = []
+    for f1 in files:
+        key = _pt_key(os.path.basename(f1)) or os.path.basename(f1)
+        for sensor in ("s1", "s2"):
+            path = f1 if sensor == "s1" else f1.replace("_s1_", "_s2_")
+            if not os.path.exists(path):
+                continue
+            m, nfr, peak = hold_average(path)
+            rec = {"grasp": key, "sensor": sensor, "n_hold_frames": nfr,
+                   "peak_sum": round(float(peak), 2),
+                   "map_sum": round(float(m.sum()), 2),
+                   "hold_frac": HOLD_FRAC,
+                   "baseline_subtracted": bool(SUBTRACT_BASELINE)}
+            rec.update({c: round(float(v), 4)
+                        for c, v in zip(cols, m.reshape(-1))})
+            rows.append(rec)
+    if not rows:
+        return None
+    out = os.path.join(run_dir, "hold_average_maps.csv")
+    pd.DataFrame(rows).to_csv(out, index=False)
+    if verbose:
+        print(f"[maps] saved {out} ({len(rows)} rows = "
+              f"{len(files)} grasps x 2 sensors)")
+    return out
 
 
 def _pt_key(text):
@@ -581,6 +635,11 @@ def stitch_run(run_dir, res_mm=1.0):
         made = _stitch_run_body(run_dir, res_mm)
     finally:
         sys.stdout = old            # restore even if the body raised
+
+    try:
+        save_hold_averages(run_dir)
+    except Exception as e:
+        print(f"[maps] could not save hold_average_maps.csv ({e})")
 
     hdr = ["STITCH REPORT",
            f"written   : {time.strftime('%Y-%m-%d %H:%M:%S')}",
