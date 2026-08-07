@@ -714,7 +714,7 @@ from curobo.geom.types import WorldConfig, Cuboid
 #   True  = table collision slab active (the Step-1 change under test).
 # Set False first and run the centered 1x1: if it no longer explodes, the
 # collision world was the trigger. Then flip True to reconfirm.
-USE_COLLISION_WORLD = True
+USE_COLLISION_WORLD = False
 
 TABLE_TOP_Z_M   = 0.985            # slab top (below base 0.99275, below fingertips)
 TABLE_CENTER_XY = (0.0009, 0.0)    # table footprint centre  (world, m)
@@ -846,15 +846,7 @@ APPROACH_AXIS_WORLD = rotmat(ROBOT_WORLD_QUAT_WXYZ) @ APPROACH_AXIS_BASE
 # A/B'd in one run.
 #   GRASP_APPROACH_ALONG_TOOL=0  (default) world Z, exactly as before
 #   GRASP_APPROACH_ALONG_TOOL=1            along the tool approach axis
-# APPROACH_ALONG_TOOL = os.environ.get("GRASP_APPROACH_ALONG_TOOL", "0") == "1"
-APPROACH_ALONG_TOOL = os.environ.get("GRASP_APPROACH_ALONG_TOOL", "1") == "1"
-
-# GRAPH SEARCH for the free move (see plan_free_move). ON by default: without
-# it a rolled pad whose only IK solution sits on another arm branch is
-# reported unreachable even though the arm can get there through open air.
-ENABLE_GRAPH = os.environ.get("GRASP_ENABLE_GRAPH", "1") == "1"
-print(f"[grid] GRASP_ENABLE_GRAPH = {int(ENABLE_GRAPH)} "
-      f"(free move {'searches joint space, falls back to local' if ENABLE_GRAPH else 'is LOCAL only (old behaviour)'})")
+APPROACH_ALONG_TOOL = os.environ.get("GRASP_APPROACH_ALONG_TOOL", "0") == "1"
 print(f"[grid] GRASP_APPROACH_ALONG_TOOL = {int(APPROACH_ALONG_TOOL)} "
       f"(approach/descend along "
       f"{'the TOOL axis' if APPROACH_ALONG_TOOL else 'world Z'}; "
@@ -995,56 +987,16 @@ def _probe_all(prim_paths):
     return {name: _read_prim_world(pp) for name, pp in prim_paths.items()}
 
 def plan_free_move(start_q, target_base, label):
-    """Point-to-point move through open air to the stand-off pose.
-
-    GRAPH SEARCH (2026-08-06). This used enable_graph=False, which limits
-    cuRobo to LOCAL trajectory optimisation: it takes one straight guess and
-    smooths it. That is fast, and it was fine for years because every grid
-    point sat on the same arm branch as the previous one.
-
-    Rolling the pad broke that. The IK probe on the failed 45 deg point found
-    a perfectly good solution — 0.001 mm pose error — but at
-    shoulder_pan = +1.96 rad, while the arm sits near -0.85 rad. The goal is
-    real and reachable; it is just ~160 deg away in joint space, and a local
-    optimiser cannot cross that gap, so it reported "no IK solution".
-    enable_graph=True makes cuRobo search a route through joint space first
-    and then smooth it, which is what that swing needs.
-
-    ONLY the free move gets this. plan_stitched_z and plan_stitched_line move
-    the pad in 0.8 mm steps while it is near or touching the rod; a graph
-    search there would be free to jump branches mid-contact, which is exactly
-    what those functions exist to prevent.
-
-    The graph attempt is tried FIRST and falls back to the old local plan if
-    it fails, so this cannot do worse than the previous behaviour.
-      GRASP_ENABLE_GRAPH=0  restores the old local-only planning
-    """
     s = JointState.from_position(
             ta.to_device(start_q.astype(np.float32)).view(1, -1),
             joint_names=ARM_JOINT_NAMES)
     g = Pose(position=ta.to_device(target_base.astype(np.float32)).view(1, 3),
              quaternion=ta.to_device(tq.astype(np.float32)).view(1, 4))
-    attempts = ([(True, "graph"), (False, "local")] if ENABLE_GRAPH
-                else [(False, "local")])
-    last = None
-    for use_graph, how in attempts:
-        try:
-            r = mg.plan_single(s, g, MotionGenPlanConfig(
-                max_attempts=5, enable_graph=use_graph))
-        except Exception as e:
-            print(f"  [{label}] free move ({how}) raised "
-                  f"{type(e).__name__}: {e}")
-            continue
-        last = r
-        if r.success.item():
-            if how == "local" and ENABLE_GRAPH:
-                print(f"  [{label}] free move fell back to LOCAL planning")
-            return r.get_interpolated_plan().position.cpu().numpy()
-        if ENABLE_GRAPH:
-            print(f"  [{label}] free move ({how}) failed ({r.status})")
-    print(f"  [{label}] free move FAILED "
-          f"({last.status if last is not None else 'no result'})")
-    return None
+    r = mg.plan_single(s, g, MotionGenPlanConfig(max_attempts=5, enable_graph=False))
+    if not r.success.item():
+        print(f"  [{label}] free move FAILED ({r.status})")
+        return None
+    return r.get_interpolated_plan().position.cpu().numpy()
 
 def plan_stitched_z(start_q, dz, label):
     metric = PoseCostMetric(hold_partial_pose=True,

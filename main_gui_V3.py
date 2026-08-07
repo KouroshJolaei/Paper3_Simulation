@@ -150,8 +150,6 @@ class CockpitGUI:
             "stitch_want_gsr": tk.BooleanVar(value=False),
             # Stitch-tab: append the blob-axis metric self-test to the report
             "blob_selftest": tk.BooleanVar(value=False),
-            # Stitch-tab: fit the contact band width from the run's own maps
-            "blob_fit_width": tk.BooleanVar(value=False),
             # ---- colour-scale policy (2026-08-04) ----
             # Written to Data/plot_scale.json and read by stitching.py,
             # heatmaps.py and temporal_snapshots.py, so every figure in the
@@ -1755,24 +1753,15 @@ class CockpitGUI:
                                              sticky="w"); r += 1
         ttk.Label(frm, justify="left", foreground="#555", wraplength=430, text=(
             "Per grasp, the weighted-PCA principal axis of the contact blob\n"
-            "(Paper 2's own method), against the angle the GEOMETRY implies:\n"
-            "the contact band clipped by the pad window, put through the same\n"
-            "7x4 estimator. Offsets matter — a tilted band pushed off-centre\n"
-            "is only partly visible, and a short piece of a tilted line reads\n"
-            "much straighter than the line itself, so 'expected' is often far\n"
-            "from the rod tilt. Everything comes from this run's own folder.\n"
+            "(Paper 2's own method), against the angle the geometry says it\n"
+            "should have: rod tilt as seen from the rolled pad. Both come from\n"
+            "this run's own folder — roll is MEASURED from pad_actual_R.\n"
+            "Expected = 0 means the pad was rolled to follow the rod, so the\n"
+            "contact line should run straight up the pad: the cleanest test.\n"
             "Per grasp, not on the stitched map — on a 1xN sweep the stitched\n"
             "blob's shape is set by the stepping direction, not the contact.")
                   ).grid(row=r, column=0, columnspan=3, sticky="w",
                          pady=(0, 4)); r += 1
-        ttk.Label(frm, text="contact band width (mm)").grid(row=r, column=0,
-                                                            sticky="e")
-        self.vars["blob_band_mm"] = tk.StringVar(value="8.0")
-        ttk.Entry(frm, textvariable=self.vars["blob_band_mm"], width=8).grid(
-            row=r, column=1, sticky="w", padx=4); r += 1
-        ttk.Checkbutton(frm, text="fit band width from this run's own maps",
-                        variable=self.vars["blob_fit_width"]).grid(
-            row=r, column=0, columnspan=3, sticky="w"); r += 1
         ttk.Checkbutton(frm, text="also show the metric self-test "
                                   "(ideal line contact -> what PCA reads)",
                         variable=self.vars["blob_selftest"]).grid(
@@ -1941,11 +1930,6 @@ class CockpitGUI:
         import traceback
         run = self._stitch_target_dir()
         selftest = bool(self.vars["blob_selftest"].get())
-        fit_w = bool(self.vars["blob_fit_width"].get())
-        try:
-            band = float(self.vars["blob_band_mm"].get())
-        except Exception:
-            band = 8.0
         self.stitch_status.config(text="measuring blob axis…",
                                   foreground="#06a")
 
@@ -1957,8 +1941,7 @@ class CockpitGUI:
                         "Blob Axis",
                         "blob_axis.py not found (expected in viz/)."))
                     return
-                report, pngs = mod.blob_and_save(
-                    run, band_width_mm=band, fit_width=fit_w)
+                report, pngs = mod.blob_and_save(run)
                 if selftest:
                     report = report + "\n\n" + mod.metric_selftest()
                 self.root.after(0, lambda: self._show_blob_report(

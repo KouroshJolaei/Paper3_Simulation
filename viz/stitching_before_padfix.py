@@ -62,95 +62,6 @@ OUTLIER_MM = 8.0                   # drop a grasp if recorded pose is >8mm
                                    # off its commanded pose (bad pose record)
 MIRROR_S2_IN_OVERLAY = False        # column 3: show s2 mirrored L-R, since
                                    # the two pads face each other (display only)
-
-# ------------------------------------------------------------ pad roll ----
-# PAD ROLL GEOMETRY (added 2026-08-05) — ONE definition of "where does the
-# 22x37 footprint actually lie", used by the splat (build_canvas._splat_one),
-# by every drawing that outlines a pad, and by validation.py's round-trip
-# sampler. Before this, the splat rotated (2026-08-04) but the DRAWINGS and
-# the SAMPLER did not, so a rolled run was painted correctly and then
-# outlined, sized and re-sampled as though it were upright.
-#
-# A "basis" is ((ay, az), (uy, uz)) — the pad's own ACROSS (4 columns,
-# PITCH_Y) and UP (7 rows, PITCH_Z) unit vectors in the world Y-Z plane, as
-# returned by load_pad_bases() from the MEASURED pad_actual_R. basis=None
-# means upright, and every helper below then reduces exactly to the old
-# axis-aligned arithmetic, so upright runs are bit-for-bit unchanged.
-FLAT_BASIS = (np.array([1.0, 0.0]), np.array([0.0, 1.0]))
-ROLL_DEADBAND_DEG = 0.05     # FK noise on a truly upright pad is ~0.0005 deg
-
-
-def pad_roll_deg(basis):
-    """Signed roll of the pad in the Y-Z plane, degrees, from its across-axis.
-    0 = upright. Sign follows the measured basis, NOT the commanded angle."""
-    if basis is None:
-        return 0.0
-    (ay, az), _ = basis
-    return float(np.degrees(np.arctan2(float(az), float(ay))))
-
-
-def is_flat(basis):
-    """True if this pad should be treated as upright. Without the deadband,
-    ordinary FK noise (8e-06 deg on the 2026-08-04 flat run) would push every
-    upright run onto the rotated code path."""
-    return basis is None or abs(pad_roll_deg(basis)) < ROLL_DEADBAND_DEG
-
-
-def pad_half_extents(basis=None):
-    """(half_y, half_z) of the pad footprint's AXIS-ALIGNED bounding box, mm.
-
-    A rolled pad needs more room than a flat one: its bounding box grows to
-    (W|cos| + H|sin|) x (W|sin| + H|cos|). Sizing a canvas for the flat 22x37
-    clips the rotated footprint and turns the coverage map into an octagon
-    (seen 2026-08-04 on the -25 deg run). At 0 deg this returns exactly
-    (PAD_W/2, PAD_H/2)."""
-    if is_flat(basis):
-        return PAD_W / 2.0, PAD_H / 2.0
-    (ay, az), _ = basis
-    c, s = abs(float(ay)), abs(float(az))
-    return (PAD_W * c + PAD_H * s) / 2.0, (PAD_W * s + PAD_H * c) / 2.0
-
-
-def pad_corners(oy, oz, basis=None):
-    """Closed 5-point outline (Y, Z) of the pad footprint centred at (oy, oz).
-    Corners walk the pad's OWN axes, so at roll the outline is the true
-    rotated rectangle instead of an axis-aligned box that no longer contains
-    the painted taxels."""
-    a, u = (FLAT_BASIS if is_flat(basis)
-            else (np.asarray(basis[0], float), np.asarray(basis[1], float)))
-    hw, hh = PAD_W / 2.0, PAD_H / 2.0
-    sgn = [(-1, -1), (+1, -1), (+1, +1), (-1, +1), (-1, -1)]
-    Y = np.array([oy + sa * hw * a[0] + su * hh * u[0] for sa, su in sgn])
-    Z = np.array([oz + sa * hw * a[1] + su * hh * u[1] for sa, su in sgn])
-    return Y, Z
-
-
-def rotated_footprint_index(cell_y, cell_z, oy, oz, tax, basis):
-    """Which canvas cells lie under a ROLLED pad, and which taxel owns each.
-
-    Returns (inside, ri, ci):
-      inside : (nz, ny) bool canvas mask of the rotated 22x37 footprint
-      ri, ci : 1-D arrays, one entry per True cell of `inside` in C order,
-               giving that cell's NEAREST taxel row and column.
-
-    Nearest-taxel (Voronoi) on the pad's own lattice, identical to the flat
-    rule but measured along the pad's axes. This is the SINGLE definition of
-    the rotated paint rule: build_canvas._splat_one paints with it and
-    validation._sample_canvas inverts it, so the two cannot drift apart."""
-    (ay, az), (uy, uz) = basis
-    LY, LZ = np.meshgrid(np.asarray(cell_y, float) - oy,
-                         np.asarray(cell_z, float) - oz)      # (nz, ny)
-    a = LY * ay + LZ * az                  # coordinate ACROSS the pad, mm
-    b = LY * uy + LZ * uz                  # coordinate UP the pad,     mm
-    inside = (np.abs(a) <= PAD_W / 2.0) & (np.abs(b) <= PAD_H / 2.0)
-    if not inside.any():
-        return inside, np.empty(0, int), np.empty(0, int)
-    _uy = tax[0, :, 0]          # 4 column centres, pad-local (CAL applied)
-    _uz = tax[:, 0, 1]          # 7 row centres,    pad-local
-    ci = np.argmin(np.abs(a[inside][:, None] - _uy[None, :]), axis=1)
-    ri = np.argmin(np.abs(b[inside][:, None] - _uz[None, :]), axis=1)
-    return inside, ri, ci
-
 # ---------------------------------------------------------------- colour ----
 # COLOUR-SCALE POLICY (added 2026-08-04) — one source of truth, like
 # HOLD_FRAC and SUBTRACT_BASELINE above, so heatmaps.py, temporal_snapshots.py
@@ -366,59 +277,6 @@ def _span_mm(offs):
 DEGENERATE_SPAN_MM = 1.0     # >1 grasp but everything within 1 mm = broken source
 
 
-def _tool_offset_z(run_dir):
-    """Flange->pad distance used by the run, in metres. Every run records it;
-    fall back to the Ø26 value only as a last resort."""
-    for name, key in (("reachability_report.json", "TOOL_OFFSET_Z"),
-                      ("pad_truth_probe.json", "TOOL_OFFSET_Z_used_m")):
-        p = os.path.join(run_dir, name)
-        if os.path.exists(p):
-            try:
-                with open(p) as f:
-                    v = float(json.load(f)[key])
-                if 0.05 < v < 0.30:
-                    return v
-            except Exception:
-                pass
-    return 0.15657
-
-
-def _pad_from_ee(pts, tool_z):
-    """TRUE pad-face centre per grasp, from the recorded flange pose.
-
-    WHY THIS EXISTS (2026-08-04)
-    ----------------------------
-    pad_actual_pos_m is NOT the pad centre. Measured against the same run's
-    pad_truth_probe.json it is the sensor CASE prim at OPEN grip, so it is
-    wrong by two independent amounts:
-        open->closed finger swing   13.04 mm
-        pad centre above the case   22.10 mm   (PAD_CENTER_ABOVE_CASE_M)
-        --------------------------------------
-        total                       35.14 mm in Z  (+14.2 mm in Y)
-    Multi-grasp sweeps hid this: the error is constant, so _reanchor_to_gui
-    removed it. But that helper needs >= 2 matching points, so SINGLE-point
-    runs kept the raw offset and plotted ~35 mm too high.
-
-    The flange pose has no such problem:
-        pad_centre = ee_world + R_pad[:, 2] * TOOL_OFFSET_Z
-    Because it goes through the pad's own rotation it stays exact when the
-    pad is ROLLED. Checked against both runs of 2026-08-04: agrees with the
-    commanded pose to 0.03 mm flat AND at 20 deg roll."""
-    offs = {}
-    for p in pts:
-        key = _pt_key(p.get("tag", ""))
-        ee, R = p.get("ee_world_m"), p.get("pad_actual_R")
-        if not (key and ee and R):
-            continue
-        try:
-            R = np.asarray(R, float)
-            pad = np.asarray(ee, float) + R[:, 2] * float(tool_z)
-            offs[key] = (float(pad[1]) * 1000.0, float(pad[2]) * 1000.0)
-        except Exception:
-            continue
-    return offs
-
-
 def load_offsets(run_dir):
     """Return ({ptNN: (y_mm, z_mm)}, source_string) in a common frame.
 
@@ -426,14 +284,10 @@ def load_offsets(run_dir):
     DEGENERATE (all grasps within ~1 mm of one spot — a pose-recording
     bug we have actually seen, where pad_actual stayed stuck at the
     startup pose):
-      0. ee_world_m + R*TOOL_OFFSET_Z          (TRUE pad centre — preferred)
-      1. pose_history.json  pad_actual_pos_m   (open-grip CASE prim: biased!)
+      1. pose_history.json  pad_actual_pos_m   (real recorded pad positions)
       2. pose_history.json  ee_world_m         (EE differences == pad differences)
       3. pose_history.json  pad_desired_pos_m  (initial + commanded offset)
       4. run config points                     (commanded offsets)
-    Source 0 was added 2026-08-04 and supersedes 1 — see _pad_from_ee for the
-    35 mm bias it removes. 1-3 are kept as fallbacks for older runs whose
-    pose_history lacks pad_actual_R.
     The chosen source is printed and shown in the figure title."""
     candidates = []
     ph = os.path.join(run_dir, "pose_history.json")
@@ -441,10 +295,6 @@ def load_offsets(run_dir):
         with open(ph) as f:
             data = json.load(f)
         pts = data.get("points", [])
-        true_offs = _pad_from_ee(pts, _tool_offset_z(run_dir))
-        if true_offs:
-            candidates.append((true_offs, "pose_history.json [pad centre "
-                                          "from EE+FK]"))
         for field in ("pad_actual_pos_m", "ee_world_m", "pad_desired_pos_m"):
             offs = {}
             for p in pts:
@@ -476,48 +326,6 @@ def load_offsets(run_dir):
         offs, src = candidates[0]
         return offs, src + "  (WARNING: degenerate offsets!)"
     return {}, "none"
-
-
-def load_pad_bases(run_dir):
-    """{ptNN: ((ay, az), (uy, uz))} — the pad's OWN axes in the world Y-Z
-    plane, as unit vectors, MEASURED from pose_history's pad_actual_R.
-
-    WHY (2026-08-04): the splat paints the 7x4 map on an axis-aligned
-    lattice, which is only right while the pad is vertical. Once the pad is
-    ROLLED (GRASP_ROT_DEG) the 22x37 footprint must land rotated, or the
-    stitched map shows a tilted grasp as though it were upright.
-
-    Taken from the RECORDED pose, not the commanded angle, so if the arm
-    does not reach the requested roll the figure still tells the truth.
-      across (4 columns, PITCH_Y) = R[:, 0] projected to (Y, Z)
-      up     (7 rows,    PITCH_Z) = -R[:, 2] projected to (Y, Z)
-    Verified on 2026-08-04: flat run gives (1,0)/(0,1); the -20 deg run
-    gives (0.9397, 0.3420) = (cos20, sin20)."""
-    out = {}
-    ph = os.path.join(run_dir, "pose_history.json")
-    if not os.path.exists(ph):
-        return out
-    try:
-        with open(ph) as f:
-            pts = json.load(f).get("points", [])
-    except Exception:
-        return out
-    for p in pts:
-        key = _pt_key(p.get("tag", ""))
-        R = p.get("pad_actual_R")
-        if not (key and R):
-            continue
-        try:
-            R = np.asarray(R, float)
-            a = np.array([R[1, 0], R[2, 0]])       # across the pad
-            u = np.array([-R[1, 2], -R[2, 2]])     # up the pad
-            na, nu = np.linalg.norm(a), np.linalg.norm(u)
-            if na < 1e-6 or nu < 1e-6:
-                continue
-            out[key] = (a / na, u / nu)
-        except Exception:
-            continue
-    return out
 
 
 def _reanchor_to_gui(run_dir, offs, verbose=True):
@@ -634,15 +442,10 @@ def _composite_extended(res, which=None):
           f"identical to column 1: "
           f"{bool(np.array_equal(composite[_out], res['canvas'][_out]))}")
     y0, y1, z0, z1 = res["extent"]
-    # Measured from the pad's REAL bounding box. At roll the upright 22x37
-    # box no longer contains the painted taxels, so the old form overstated
-    # every side (at -25 deg by 6.8 mm in Y and 4.7 mm in Z).
-    _b = res.get("bases", {}).get(key)
-    _hy, _hz = pad_half_extents(_b)
-    ext_mm = {"left":  (oy - _hy) - y0,
-              "right": y1 - (oy + _hy),
-              "down":  (oz - _hz) - z0,
-              "up":    z1 - (oz + _hz)}
+    ext_mm = {"left":  (oy - PAD_W / 2.0) - y0,
+              "right": y1 - (oy + PAD_W / 2.0),
+              "down":  (oz - PAD_H / 2.0) - z0,
+              "up":    z1 - (oz + PAD_H / 2.0)}
     return composite, (float(oy), float(oz)), key, ext_mm
 
 
@@ -655,21 +458,9 @@ def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True):
     if not offs:
         raise RuntimeError("no pad offsets found "
                            "(need pose_history.json or the run's config copy)")
-    # The EE+FK source is ALREADY the true pad centre in world/GUI coordinates,
-    # so re-anchoring it would subtract a shift that is not there. Only the
-    # legacy biased sources still need _reanchor_to_gui — and that helper needs
-    # >= 2 matching points, which is why single-point runs used to come out
-    # ~35 mm high before the EE+FK source existed.
-    if "from EE+FK" in src:
-        gui_frame = True
-        if verbose:
-            print("[stitch] pad centre taken from EE+FK — already in the GUI "
-                  "frame, no re-anchor needed (exact for 1 grasp and for "
-                  "rolled pads)")
-    else:
-        gui_frame = "pose_history" not in src    # config offsets are GUI-frame
-        if "pose_history" in src:
-            offs, gui_frame = _reanchor_to_gui(run_dir, offs, verbose=verbose)
+    gui_frame = "pose_history" not in src        # config offsets are GUI-frame
+    if "pose_history" in src:
+        offs, gui_frame = _reanchor_to_gui(run_dir, offs, verbose=verbose)
     files = sorted(glob.glob(os.path.join(run_dir, f"*_{sensor}_tactile_maps.csv")))
     cal = cal if cal is not None else CAL[sensor]
     grasps = []                                    # (key, (y_mm,z_mm), map7x4)
@@ -728,16 +519,8 @@ def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True):
     # hug the swept region exactly (== the grid outer bound + pad), no dead blue
     # border. All three columns use this same extent.
     MARGIN = 0.0
-    # A ROLLED pad needs a bigger canvas than a flat one (see
-    # pad_half_extents). Flat runs are untouched: at 0 deg this reduces
-    # exactly to PAD_W / PAD_H.
-    _bases0 = load_pad_bases(run_dir)
-    _fy, _fz = PAD_W / 2.0, PAD_H / 2.0
-    for _b in _bases0.values():
-        _hy, _hz = pad_half_extents(_b)
-        _fy, _fz = max(_fy, _hy), max(_fz, _hz)
-    half_y = (max(ys) - min(ys)) / 2.0 + _fy + MARGIN
-    half_z = (max(zs) - min(zs)) / 2.0 + _fz + MARGIN
+    half_y = (max(ys) - min(ys)) / 2.0 + PAD_W / 2.0 + MARGIN
+    half_z = (max(zs) - min(zs)) / 2.0 + PAD_H / 2.0 + MARGIN
     ny = int(np.ceil(2 * half_y / res_mm))
     nz = int(np.ceil(2 * half_z / res_mm))
     y0, z0 = cy - half_y, cz - half_z                        # origin (mm)
@@ -757,46 +540,19 @@ def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True):
     _uy = tax[0, :, 0]          # 4 column centres, pad-local (CAL already applied)
     _uz = tax[:, 0, 1]          # 7 row centres,    pad-local
 
-    # Pad roll, measured per grasp. Empty dict -> every grasp paints flat.
-    _bases = _bases0
-    if verbose and _bases:
-        _rolls = [abs(pad_roll_deg(b)) for b in _bases.values()]
-        if max(_rolls) > ROLL_DEADBAND_DEG:
-            print(f"[stitch] pad ROLL applied to the splat, the drawn pad "
-                  f"outlines and the canvas size: "
-                  f"{min(_rolls):.1f}..{max(_rolls):.1f} deg "
-                  f"(measured from pad_actual_R)")
-
-    def _splat_one(oy, oz, m, acc, cnt, sq, basis=None):
-        """Paint one grasp, still nearest-taxel (Voronoi) so the pad tiles
-        exactly. When the pad is ROLLED the canvas offsets are projected onto
-        the pad's OWN axes first, so the 22x37 footprint lands rotated
-        (2026-08-04). The fast separable path is kept for the flat case, so
-        nothing about existing upright runs changes by even one cell."""
-        if is_flat(basis):
-            ly = _cell_y - oy                      # pad-local mm
-            lz = _cell_z - oz
-            sy = np.where(np.abs(ly) <= PAD_W / 2.0)[0]
-            sz = np.where(np.abs(lz) <= PAD_H / 2.0)[0]
-            if sy.size == 0 or sz.size == 0:
-                return
-            ci = np.argmin(np.abs(ly[sy][None, :] - _uy[:, None]), axis=0)
-            ri = np.argmin(np.abs(lz[sz][None, :] - _uz[:, None]), axis=0)
-            sub = m[np.ix_(ri, ci)]
-            acc[np.ix_(sz, sy)] += sub
-            cnt[np.ix_(sz, sy)] += 1.0
-            sq[np.ix_(sz, sy)] += sub * sub
+    def _splat_one(oy, oz, m, acc, cnt, sq):
+        ly = _cell_y - oy                          # pad-local mm
+        lz = _cell_z - oz
+        sy = np.where(np.abs(ly) <= PAD_W / 2.0)[0]
+        sz = np.where(np.abs(lz) <= PAD_H / 2.0)[0]
+        if sy.size == 0 or sz.size == 0:
             return
-
-        # rotated: full 2-D pass over the canvas, via the ONE shared rule
-        inside, ri, ci = rotated_footprint_index(
-            _cell_y, _cell_z, oy, oz, tax, basis)
-        if not inside.any():
-            return
-        vals = m[ri, ci]
-        acc[inside] += vals
-        cnt[inside] += 1.0
-        sq[inside] += vals * vals
+        ci = np.argmin(np.abs(ly[sy][None, :] - _uy[:, None]), axis=0)
+        ri = np.argmin(np.abs(lz[sz][None, :] - _uz[:, None]), axis=0)
+        sub = m[np.ix_(ri, ci)]
+        acc[np.ix_(sz, sy)] += sub
+        cnt[np.ix_(sz, sy)] += 1.0
+        sq[np.ix_(sz, sy)] += sub * sub
 
     def paint(indices):
         """(canvas, count, sumsq) for the given grasps, on the same grid."""
@@ -805,7 +561,7 @@ def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True):
         sq = np.zeros((nz, ny))
         for i in indices:
             key, (oy, oz), m = grasps[i]
-            _splat_one(oy, oz, m, acc, cnt, sq, _bases.get(key))
+            _splat_one(oy, oz, m, acc, cnt, sq)
         return np.where(cnt > 0, acc / np.maximum(cnt, 1.0), 0.0), cnt, sq
 
     canvas, cnt, sq = paint(range(len(grasps)))
@@ -826,10 +582,6 @@ def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True):
             "grasps": grasps, "center_index": center_i,
             "center_key": grasps[center_i][0],
             "gui_frame": gui_frame,
-            # measured pad roll per grasp ({} when upright / no pose_history).
-            # Published so the plots and validation.py outline and re-sample
-            # the SAME footprint the splat painted.
-            "bases": _bases,
             "overlap_std": overlap_std,
             "overlap_rel": overlap_std / overlap_mean,
             "res_mm": res_mm, "offset_source": src, "paint": paint}
@@ -1044,57 +796,30 @@ def _stitch_run_body(run_dir, res_mm=1.0):
             cal = CAL[sensor]
             tax = _taxel_centers(cal)
             gmap = {g[0]: g[2] for g in res["grasps"]}         # ptNN -> 7x4 map
-            gbase = res.get("bases", {})
-            # POSITIONS stay COMMANDED (that is the point of this column —
-            # immune to per-grasp pose noise). ORIENTATION is taken from the
-            # MEASURED pad_actual_R, because roll is one constant per run, not
-            # per-point noise, and because the sign convention of the
-            # commanded angle is not independently confirmed. Flip this line
-            # to a commanded angle if you ever want the pure-command view.
-            pts = [(gui["cmd"][k][0], gui["cmd"][k][1], gmap[k], gbase.get(k))
+            pts = [(gui["cmd"][k][0], gui["cmd"][k][1], gmap[k])
                    for k in gmap if k in gui["cmd"]]
             gy = [p[0] for p in pts]; gz = [p[1] for p in pts]
-            _phy = max(pad_half_extents(p[3])[0] for p in pts)
-            _phz = max(pad_half_extents(p[3])[1] for p in pts)
-            hy = (max(gy) - min(gy)) / 2 + _phy
-            hz = (max(gz) - min(gz)) / 2 + _phz
+            hy = (max(gy) - min(gy)) / 2 + PAD_W / 2
+            hz = (max(gz) - min(gz)) / 2 + PAD_H / 2
             ccy = (max(gy) + min(gy)) / 2; ccz = (max(gz) + min(gz)) / 2
             gny = int(np.ceil(2 * hy / res_mm)); gnz = int(np.ceil(2 * hz / res_mm))
             gy0 = ccy - hy; gz0 = ccz - hz
-            _gcell_y = gy0 + np.arange(gny) * res_mm
-            _gcell_z = gz0 + np.arange(gnz) * res_mm
             acc = np.zeros((gnz, gny)); gcnt = np.zeros((gnz, gny))
-            for oy, oz, m, gb in pts:
-                if is_flat(gb):
-                    # unchanged fixed-block paint: upright runs render exactly
-                    # as they always have, cell for cell
-                    for r in range(N_ROWS):
-                        for c in range(N_COLS):
-                            ty = oy + tax[r, c, 0]; tz = oz + tax[r, c, 1]
-                            iy0 = int(round((ty - PITCH_Y/2 - gy0)/res_mm))
-                            iy1 = int(round((ty + PITCH_Y/2 - gy0)/res_mm))
-                            iz0 = int(round((tz - PITCH_Z/2 - gz0)/res_mm))
-                            iz1 = int(round((tz + PITCH_Z/2 - gz0)/res_mm))
-                            iy0, iy1 = max(iy0,0), min(iy1,gny)
-                            iz0, iz1 = max(iz0,0), min(iz1,gnz)
-                            if iy1>iy0 and iz1>iz0:
-                                acc[iz0:iz1, iy0:iy1] += m[r,c]
-                                gcnt[iz0:iz1, iy0:iy1] += 1.0
-                else:
-                    # rolled: same rule the stitcher painted with, so this
-                    # column and column 1 show the same footprint shape
-                    inside, ri, ci = rotated_footprint_index(
-                        _gcell_y, _gcell_z, oy, oz, tax, gb)
-                    if not inside.any():
-                        continue
-                    acc[inside] += m[ri, ci]
-                    gcnt[inside] += 1.0
+            for oy, oz, m in pts:
+                for r in range(N_ROWS):
+                    for c in range(N_COLS):
+                        ty = oy + tax[r, c, 0]; tz = oz + tax[r, c, 1]
+                        iy0 = int(round((ty - PITCH_Y/2 - gy0)/res_mm))
+                        iy1 = int(round((ty + PITCH_Y/2 - gy0)/res_mm))
+                        iz0 = int(round((tz - PITCH_Z/2 - gz0)/res_mm))
+                        iz1 = int(round((tz + PITCH_Z/2 - gz0)/res_mm))
+                        iy0, iy1 = max(iy0,0), min(iy1,gny)
+                        iz0, iz1 = max(iz0,0), min(iz1,gnz)
+                        if iy1>iy0 and iz1>iz0:
+                            acc[iz0:iz1, iy0:iy1] += m[r,c]
+                            gcnt[iz0:iz1, iy0:iy1] += 1.0
             gcanvas = np.where(gcnt>0, acc/np.maximum(gcnt,1.0), 0.0)
             gext = (gy0, gy0+gny*res_mm, gz0, gz0+gnz*res_mm)
-            _r3 = [pad_roll_deg(p[3]) for p in pts]
-            if max(abs(r) for r in _r3) > ROLL_DEADBAND_DEG:
-                print(f"[stitch] column 3 pads drawn ROLLED "
-                      f"{min(_r3):+.1f}..{max(_r3):+.1f} deg (measured)")
 
             ax3 = fig.add_subplot(1, ncols, 3)
             clipped = np.ma.masked_where(~(gcnt>0), gcanvas)
@@ -1148,48 +873,31 @@ def _stitch_run_body(run_dir, res_mm=1.0):
         ax4 = fig.add_subplot(1, ncols, ncols)
         im4 = ax4.imshow(comp, cmap="jet", origin="lower",
                          extent=ext, aspect="equal", vmin=v_lo, vmax=v_hi)
-        # The outline walks the pad's OWN axes, so at roll it is the true
-        # rotated rectangle around the painted taxels instead of an upright
-        # box that cuts two corners off and includes two empty ones.
-        c_basis = res.get("bases", {}).get(c_key)
-        c_roll = pad_roll_deg(c_basis)
-        rY, rZ = pad_corners(c_oy, c_oz, c_basis)
+        ry0, ry1 = c_oy - PAD_W / 2.0, c_oy + PAD_W / 2.0
+        rz0, rz1 = c_oz - PAD_H / 2.0, c_oz + PAD_H / 2.0
+        rY = [ry0, ry1, ry1, ry0, ry0]
+        rZ = [rz0, rz0, rz1, rz1, rz0]
         ax4.plot(rY, rZ, color="k", lw=3.2, alpha=0.75)        # contrast underlay
         ax4.plot(rY, rZ, "w--", lw=1.6,
-                 label=(f"initial pad frame ({c_key})" if is_flat(c_basis)
-                        else f"initial pad frame ({c_key}, roll {c_roll:+.1f} deg)"))
+                 label=f"initial pad frame ({c_key})")
         ax4.scatter([c_oy], [c_oz], s=18, color="w",
                     edgecolor="k", linewidth=0.6, zorder=6)
-        # At roll, "up/down/left/right" are world directions measured from the
-        # pad's BOUNDING BOX, not from its own edges — say so rather than let
-        # the reader assume pad-frame numbers. Nothing is added when upright,
-        # so existing figures are unchanged.
-        _frm = ("" if is_flat(c_basis)
-                else f" [from pad bbox, roll {c_roll:+.1f} deg]")
         ax4.set_title(
             f"initial contact ({c_key}) + extended map\n"
             f"extends  up {exd['up']:.1f} / down {exd['down']:.1f} / "
-            f"left {exd['left']:.1f} / right {exd['right']:.1f}  mm{_frm}\n"
+            f"left {exd['left']:.1f} / right {exd['right']:.1f}  mm\n"
             f"colour scale shared with col 1 (raw interior may saturate)",
             fontsize=9)
         ax4.set_xlabel("Y (mm)")
         ax4.legend(fontsize=6, loc="upper right")
         fig.colorbar(im4, ax=ax4, shrink=0.85).set_label("pressure (a.u.)",
                                                          fontsize=8)
-        # The taxel conversion divides world mm by a PAD-FRAME pitch, which
-        # only means something while the pad is upright. At roll it is
-        # withheld rather than printed as a number that looks meaningful.
-        _tax_txt = (f"  |  taxels  "
-                    f"up={exd['up']/PITCH_Z:.2f} down={exd['down']/PITCH_Z:.2f} "
-                    f"left={exd['left']/PITCH_Y:.2f} "
-                    f"right={exd['right']/PITCH_Y:.2f}"
-                    if is_flat(c_basis) else
-                    f"  |  taxels n/a (pad rolled {c_roll:+.1f} deg; world mm "
-                    f"do not map onto pad pitches)")
         print(f"[stitch {sensor}] initial frame = {c_key} (INITIAL_GRASP="
               f"{INITIAL_GRASP!r}); extension mm  "
               f"up={exd['up']:.1f} down={exd['down']:.1f} "
-              f"left={exd['left']:.1f} right={exd['right']:.1f}{_tax_txt}")
+              f"left={exd['left']:.1f} right={exd['right']:.1f}  |  taxels  "
+              f"up={exd['up']/PITCH_Z:.2f} down={exd['down']/PITCH_Z:.2f} "
+              f"left={exd['left']/PITCH_Y:.2f} right={exd['right']/PITCH_Y:.2f}")
 
         fig.suptitle(f"BLOCK 2 — stitched contact map [{sensor}]   "
                      f"(offsets: {res['offset_source']}, {res_mm} mm/cell, "
@@ -1225,17 +933,8 @@ def export_pair(run_dir, res_mm=1.0):
         out[f"target_composite_{sensor}"] = comp
         meta[f"initial_{sensor}"] = c_key
         meta[f"initial_mode_{sensor}"] = INITIAL_GRASP
-        # frame_rect stays the AXIS-ALIGNED box for backward compatibility,
-        # but is now the rolled pad's true bounding box (identical at 0 deg).
-        # frame_poly is the exact footprint; frame_roll_deg says which applies.
-        _cb = res.get("bases", {}).get(c_key)
-        _chy, _chz = pad_half_extents(_cb)
-        meta[f"frame_rect_{sensor}"] = [c_oy - _chy, c_oy + _chy,
-                                        c_oz - _chz, c_oz + _chz]
-        _pY, _pZ = pad_corners(c_oy, c_oz, _cb)
-        meta[f"frame_poly_{sensor}"] = [[float(y), float(z)]
-                                        for y, z in zip(_pY, _pZ)]
-        meta[f"frame_roll_deg_{sensor}"] = pad_roll_deg(_cb)
+        meta[f"frame_rect_{sensor}"] = [c_oy - PAD_W / 2.0, c_oy + PAD_W / 2.0,
+                                        c_oz - PAD_H / 2.0, c_oz + PAD_H / 2.0]
         meta[f"extension_mm_{sensor}"] = exd
         meta[f"center_{sensor}"] = res["center_key"]
         meta[f"extent_{sensor}"] = list(res["extent"])

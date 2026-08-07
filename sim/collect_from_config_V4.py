@@ -714,7 +714,7 @@ from curobo.geom.types import WorldConfig, Cuboid
 #   True  = table collision slab active (the Step-1 change under test).
 # Set False first and run the centered 1x1: if it no longer explodes, the
 # collision world was the trigger. Then flip True to reconfirm.
-USE_COLLISION_WORLD = True
+USE_COLLISION_WORLD = False
 
 TABLE_TOP_Z_M   = 0.985            # slab top (below base 0.99275, below fingertips)
 TABLE_CENTER_XY = (0.0009, 0.0)    # table footprint centre  (world, m)
@@ -846,15 +846,7 @@ APPROACH_AXIS_WORLD = rotmat(ROBOT_WORLD_QUAT_WXYZ) @ APPROACH_AXIS_BASE
 # A/B'd in one run.
 #   GRASP_APPROACH_ALONG_TOOL=0  (default) world Z, exactly as before
 #   GRASP_APPROACH_ALONG_TOOL=1            along the tool approach axis
-# APPROACH_ALONG_TOOL = os.environ.get("GRASP_APPROACH_ALONG_TOOL", "0") == "1"
-APPROACH_ALONG_TOOL = os.environ.get("GRASP_APPROACH_ALONG_TOOL", "1") == "1"
-
-# GRAPH SEARCH for the free move (see plan_free_move). ON by default: without
-# it a rolled pad whose only IK solution sits on another arm branch is
-# reported unreachable even though the arm can get there through open air.
-ENABLE_GRAPH = os.environ.get("GRASP_ENABLE_GRAPH", "1") == "1"
-print(f"[grid] GRASP_ENABLE_GRAPH = {int(ENABLE_GRAPH)} "
-      f"(free move {'searches joint space, falls back to local' if ENABLE_GRAPH else 'is LOCAL only (old behaviour)'})")
+APPROACH_ALONG_TOOL = os.environ.get("GRASP_APPROACH_ALONG_TOOL", "0") == "1"
 print(f"[grid] GRASP_APPROACH_ALONG_TOOL = {int(APPROACH_ALONG_TOOL)} "
       f"(approach/descend along "
       f"{'the TOOL axis' if APPROACH_ALONG_TOOL else 'world Z'}; "
@@ -995,56 +987,16 @@ def _probe_all(prim_paths):
     return {name: _read_prim_world(pp) for name, pp in prim_paths.items()}
 
 def plan_free_move(start_q, target_base, label):
-    """Point-to-point move through open air to the stand-off pose.
-
-    GRAPH SEARCH (2026-08-06). This used enable_graph=False, which limits
-    cuRobo to LOCAL trajectory optimisation: it takes one straight guess and
-    smooths it. That is fast, and it was fine for years because every grid
-    point sat on the same arm branch as the previous one.
-
-    Rolling the pad broke that. The IK probe on the failed 45 deg point found
-    a perfectly good solution — 0.001 mm pose error — but at
-    shoulder_pan = +1.96 rad, while the arm sits near -0.85 rad. The goal is
-    real and reachable; it is just ~160 deg away in joint space, and a local
-    optimiser cannot cross that gap, so it reported "no IK solution".
-    enable_graph=True makes cuRobo search a route through joint space first
-    and then smooth it, which is what that swing needs.
-
-    ONLY the free move gets this. plan_stitched_z and plan_stitched_line move
-    the pad in 0.8 mm steps while it is near or touching the rod; a graph
-    search there would be free to jump branches mid-contact, which is exactly
-    what those functions exist to prevent.
-
-    The graph attempt is tried FIRST and falls back to the old local plan if
-    it fails, so this cannot do worse than the previous behaviour.
-      GRASP_ENABLE_GRAPH=0  restores the old local-only planning
-    """
     s = JointState.from_position(
             ta.to_device(start_q.astype(np.float32)).view(1, -1),
             joint_names=ARM_JOINT_NAMES)
     g = Pose(position=ta.to_device(target_base.astype(np.float32)).view(1, 3),
              quaternion=ta.to_device(tq.astype(np.float32)).view(1, 4))
-    attempts = ([(True, "graph"), (False, "local")] if ENABLE_GRAPH
-                else [(False, "local")])
-    last = None
-    for use_graph, how in attempts:
-        try:
-            r = mg.plan_single(s, g, MotionGenPlanConfig(
-                max_attempts=5, enable_graph=use_graph))
-        except Exception as e:
-            print(f"  [{label}] free move ({how}) raised "
-                  f"{type(e).__name__}: {e}")
-            continue
-        last = r
-        if r.success.item():
-            if how == "local" and ENABLE_GRAPH:
-                print(f"  [{label}] free move fell back to LOCAL planning")
-            return r.get_interpolated_plan().position.cpu().numpy()
-        if ENABLE_GRAPH:
-            print(f"  [{label}] free move ({how}) failed ({r.status})")
-    print(f"  [{label}] free move FAILED "
-          f"({last.status if last is not None else 'no result'})")
-    return None
+    r = mg.plan_single(s, g, MotionGenPlanConfig(max_attempts=5, enable_graph=False))
+    if not r.success.item():
+        print(f"  [{label}] free move FAILED ({r.status})")
+        return None
+    return r.get_interpolated_plan().position.cpu().numpy()
 
 def plan_stitched_z(start_q, dz, label):
     metric = PoseCostMetric(hold_partial_pose=True,
@@ -1467,124 +1419,6 @@ def write_execution_ledger(out_dir):
     return doc
 
 
-# -------------------------------------------------------- IK PROBE ----
-# WHY (2026-08-06): the 45 deg run failed with reason_code "ik_no_solution"
-# and precheck_path "failed", i.e. mg.plan_single found no trajectory. That
-# does NOT establish that the pose is unreachable — plan_single searches from
-# ONE seed and has to find a whole collision-free trajectory, so it can miss a
-# pose that IK solves easily from a different arm branch.
-#
-# This probe asks the narrower question directly: does ANY joint solution
-# exist for that flange pose? cuRobo's IKSolver is given many random seeds and
-# only has to satisfy the pose, not a path. Three probes, run only on points
-# that already failed, so a healthy run costs nothing:
-#
-#   rolled     the real target      -> if this succeeds, the POSE is fine and
-#                                      the problem is the planner/seed
-#   upright    same position, no roll -> if this succeeds but rolled does not,
-#                                      the ORIENTATION is what cannot be met
-#   pad_only   the pad position with the UNROLLED flange offset
-#                                   -> tells us whether the 111 mm flange
-#                                      swing is what put it out of reach
-#
-# Everything is wrapped: if this cuRobo build exposes a different IK API, the
-# probe reports that and the run continues exactly as before.
-IK_PROBE = os.environ.get("GRASP_IK_PROBE", "1") == "1"
-IK_PROBE_SEEDS = int(os.environ.get("GRASP_IK_PROBE_SEEDS", "400"))
-_ik_solver = [None]          # built lazily, once
-
-
-def _get_ik_solver():
-    """cuRobo IKSolver on the SAME robot + world as the planner, or None."""
-    if _ik_solver[0] is not None:
-        return _ik_solver[0] if _ik_solver[0] is not False else None
-    try:
-        from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
-        cfg = IKSolverConfig.load_from_robot_config(
-            rc, _coll_world, rotation_threshold=0.05, position_threshold=0.002,
-            num_seeds=IK_PROBE_SEEDS, self_collision_check=True,
-            self_collision_opt=True, tensor_args=ta, use_cuda_graph=False)
-        _ik_solver[0] = IKSolver(cfg)
-        print(f"[ikprobe] IKSolver ready ({IK_PROBE_SEEDS} seeds, "
-              f"world={'table slab' if _coll_world is not None else 'None'})")
-    except Exception as e:
-        print(f"[ikprobe] unavailable ({type(e).__name__}: {e}) — probe skipped")
-        _ik_solver[0] = False
-        return None
-    return _ik_solver[0]
-
-
-def _ik_try(pos_base, quat, label):
-    """One IK query. Returns a small dict; never raises."""
-    solver = _get_ik_solver()
-    if solver is None:
-        return {"ran": False, "reason": "IKSolver unavailable"}
-    try:
-        g = Pose(position=ta.to_device(np.asarray(pos_base, np.float32)).view(1, 3),
-                 quaternion=ta.to_device(np.asarray(quat, np.float32)).view(1, 4))
-        r = solver.solve_single(g)
-        ok = bool(r.success.view(-1)[0].item())
-        out = {"ran": True, "success": ok}
-        try:
-            out["n_seeds_converged"] = int(r.success.sum().item())
-        except Exception:
-            pass
-        for key, attr in (("pos_err_mm", "position_error"),
-                          ("rot_err_deg", "rotation_error")):
-            try:
-                v = float(getattr(r, attr).view(-1)[0].item())
-                out[key] = v * 1000.0 if attr == "position_error" else \
-                    float(np.degrees(v))
-            except Exception:
-                pass
-        if ok:
-            try:
-                q = r.solution.view(-1, len(ARM_JOINT_NAMES))[0].cpu().numpy()
-                out["q_rad"] = [round(float(v), 6) for v in q]
-            except Exception:
-                pass
-        print(f"  [ikprobe] {label}: {'SOLVED' if ok else 'no solution'}"
-              + (f"  (pos_err {out['pos_err_mm']:.2f} mm)"
-                 if "pos_err_mm" in out else ""))
-        return out
-    except Exception as e:
-        print(f"  [ikprobe] {label}: FAILED ({type(e).__name__}: {e})")
-        return {"ran": False, "reason": f"{type(e).__name__}: {e}"}
-
-
-def ik_probe(ee_world, tag):
-    """Run the three probes for one failed point. Returns a dict for the report."""
-    if not IK_PROBE:
-        return {"ran": False, "reason": "GRASP_IK_PROBE=0"}
-    ee_world = np.asarray(ee_world, float)
-    pad_world = pad_from_ee_target(ee_world)
-    ee_upright = pad_world + np.array([0.0, 0.0, TOOL_OFFSET_Z])
-    out = {
-        "rolled":   _ik_try(world_to_base(ee_world), tq, f"{tag} rolled"),
-        "upright":  _ik_try(world_to_base(ee_world), tq_base, f"{tag} upright-orient"),
-        "pad_only": _ik_try(world_to_base(ee_upright), tq_base, f"{tag} unrolled-flange"),
-    }
-    # one-line verdict, so the JSON does not have to be read to know what to do
-    r, u, p = (out["rolled"].get("success"), out["upright"].get("success"),
-               out["pad_only"].get("success"))
-    if r:
-        v = ("POSE IS REACHABLE — IK solves it, so the PLANNER/seed failed, "
-             "not the geometry")
-    elif u and not r:
-        v = ("position reachable but this ORIENTATION is not — the roll itself "
-             "is what cannot be met at this pose")
-    elif p and not u:
-        v = ("only the UNROLLED flange is reachable — the flange swing from the "
-             "roll is what puts it out of reach")
-    elif r is None:
-        v = "probe did not run"
-    else:
-        v = "nothing reachable here — the pad position itself is out of workspace"
-    out["verdict"] = v
-    print(f"  [ikprobe] {tag} VERDICT: {v}")
-    return out
-
-
 def precheck_reachability(grid_points, q_home):
     """Dry-run EVERY grid point BEFORE any motion. Writes reachability_report.json.
     Returns {index: bool}. Nothing moves."""
@@ -1639,14 +1473,6 @@ def precheck_reachability(grid_points, q_home):
 
             if res["reachable"]:
                 q_seed = q_goal          # chain like the real run does
-        # Only failed points get probed, so a healthy run costs nothing.
-        if not res["reachable"]:
-            try:
-                res_probe = ik_probe(gw, tag)
-            except Exception as _pe:
-                res_probe = {"ran": False, "reason": f"{type(_pe).__name__}: {_pe}"}
-        else:
-            res_probe = None
         ok_map[idx] = bool(res["reachable"])
         row = {"index": idx,
                "pad_offset_y_mm": gp["dy_mm"], "pad_offset_z_mm": gp["dz_mm"],
@@ -1658,9 +1484,6 @@ def precheck_reachability(grid_points, q_home):
         # executor's own path was never tested for this point.
         row["reason_code"] = _reach_reason_code(res, path_used)
         row["precheck_path"] = path_used
-        if res_probe is not None:
-            row["ik_probe"] = res_probe
-            row["ik_probe_verdict"] = res_probe.get("verdict")
         _REACH_ROWS[idx] = row
         report["points"].append(row)
         mark = "OK " if res["reachable"] else "XX "
@@ -1699,10 +1522,6 @@ def precheck_reachability(grid_points, q_home):
         if not USE_COLLISION_WORLD:
             print("[reach] NOTE: USE_COLLISION_WORLD=False, so nothing was "
                   "collision-checked - 'reachable' here does NOT mean lab-safe.")
-        _verdicts = [r.get("ik_probe_verdict") for r in report["points"]
-                     if r.get("ik_probe_verdict")]
-        for _v in sorted(set(_verdicts)):
-            print(f"[ikprobe] {_verdicts.count(_v)} point(s): {_v}")
     except Exception as e:
         print(f"[reach] report write FAILED: {e}")
     # also drop a copy next to the config so the GUI always finds the newest

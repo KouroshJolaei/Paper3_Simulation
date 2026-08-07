@@ -120,6 +120,7 @@ else:
     sys.exit(2)
 
 
+# APPROACH_H    = 0.10
 APPROACH_H    = 0.10
 
 # CLOSE_RAD is the finger-joint angle we squeeze to. It is DIAMETER
@@ -209,35 +210,6 @@ _base_out = os.environ.get("GRASP_OUTPUT_DIR",
                            os.path.expanduser("~/Paper3_Simulation/Data/gui_run"))
 OUTPUT_DIR = os.path.join(_base_out, f"run_{_stamp}")
 BASENAME   = os.environ.get("GRASP_BASENAME", "gui")
-
-# ---- self-describing folder name (added 2026-08-04) ------------------------
-# Timestamps alone made it impossible to tell a 0 deg run from a 20 deg one
-# without opening gui_config_used.json. Append the two angles that define the
-# geometry of the test: obj<tilt> = cylinder tilt, pad<roll> = in-plane pad
-# roll (GRASP_ROT_DEG). Negatives become 'm' so the name stays shell-safe:
-#     run_20260804_160312_obj0_pad20
-#     run_20260804_161540_obj35_padm10
-def _ang_tag(v):
-    v = float(v)
-    s = f"{abs(v):g}".replace(".", "p")
-    return ("m" + s) if v < 0 else s
-
-try:
-    _pad_roll = float(os.environ.get("GRASP_ROT_DEG", "0.0"))
-except ValueError:
-    _pad_roll = 0.0
-
-# GRASP_RUN_DIR (set by the GUI's SESSION FOLDER) wins outright: the GUI has
-# already picked ONE folder for this test, and both the reachability dry-run
-# and the real run point at it, so a single test no longer scatters itself
-# across two timestamped folders. Without it, fall back to the old behaviour.
-_forced_dir = os.environ.get("GRASP_RUN_DIR", "").strip()
-if _forced_dir:
-    OUTPUT_DIR = os.path.expanduser(_forced_dir)
-else:
-    OUTPUT_DIR = (f"{OUTPUT_DIR}_obj{_ang_tag(OBJ_TILT_DEG)}"
-                  f"_pad{_ang_tag(_pad_roll)}")
-
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ---- PHASE LOGGER (file = ground truth; Isaac floods/hides stdout) ----------
@@ -714,7 +686,7 @@ from curobo.geom.types import WorldConfig, Cuboid
 #   True  = table collision slab active (the Step-1 change under test).
 # Set False first and run the centered 1x1: if it no longer explodes, the
 # collision world was the trigger. Then flip True to reconfirm.
-USE_COLLISION_WORLD = True
+USE_COLLISION_WORLD = False
 
 TABLE_TOP_Z_M   = 0.985            # slab top (below base 0.99275, below fingertips)
 TABLE_CENTER_XY = (0.0009, 0.0)    # table footprint centre  (world, m)
@@ -806,82 +778,6 @@ if abs(ROT_DEG) > 1e-6:
     print(f"[grid] pivot correction: EE target shifted by "
           f"({_d[0]*1000:+.1f}, {_d[1]*1000:+.1f}, {_d[2]*1000:+.1f}) mm "
           f"so the pad rolls about its own centre")
-
-# ---- FLANGE->PAD vector and TOOL APPROACH AXIS, for any roll --------------
-# PAD_OFFSET_VEC is the flange->pad vector carried through the CURRENT tool
-# orientation. It equals (0, 0, TOOL_OFFSET_Z) when upright, so nothing changes
-# without a roll. Having it as one named value stops the "pad = ee_z - TOOL"
-# shortcut, which is only true while the tool is vertical and printed the pad
-# 157 mm low in the 90 deg report of 2026-08-06.
-PAD_OFFSET_VEC = (rotmat(tq) @ (rotmat(tq_base).T @ np.array([0.0, 0.0,
-                                                              TOOL_OFFSET_Z]))
-                  if abs(ROT_DEG) > 1e-6 else
-                  np.array([0.0, 0.0, TOOL_OFFSET_Z]))
-
-
-def pad_from_ee_target(ee_world):
-    """Pad centre implied by an EE target, correct at ANY roll."""
-    return np.asarray(ee_world, float) - PAD_OFFSET_VEC
-
-
-# TOOL APPROACH AXIS (unit, BASE frame). Tool local +Z points along the
-# approach; upright that is world -Z, so this is (0, 0, -1) and every formula
-# below reduces to the original world-Z arithmetic exactly.
-APPROACH_AXIS_BASE = rotmat(tq) @ np.array([0.0, 0.0, 1.0])
-APPROACH_AXIS_WORLD = rotmat(ROBOT_WORLD_QUAT_WXYZ) @ APPROACH_AXIS_BASE
-
-# ---- WHY THE ROLLED DESCENT FAILED  (2026-08-06) -------------------------
-# plan_stitched_z steps the target along WORLD Z, but the pose metric it plans
-# under is CASE13_WEIGHT = [1,1,1,1,1,0] and MotionGen was built with
-# project_pose_to_goal_frame=True — so the ONE freed degree of freedom is the
-# TOOL's local z, not the world's. Upright the two coincide and nothing is
-# wrong. Rolled, they diverge: at 90 deg the planner is asked to travel along
-# world Z while the only axis it is allowed to move along is horizontal. The
-# request is self-contradictory, which is exactly the 90 deg failure the
-# ledger caught (predicted ok -> exec_stage "stitched_descent"), and why 30
-# and 45 deg get progressively harder.
-#
-# Fix: step along the TOOL's approach axis, i.e. the same axis the metric
-# frees. Behind a flag so upright behaviour is untouched and the two can be
-# A/B'd in one run.
-#   GRASP_APPROACH_ALONG_TOOL=0  (default) world Z, exactly as before
-#   GRASP_APPROACH_ALONG_TOOL=1            along the tool approach axis
-# APPROACH_ALONG_TOOL = os.environ.get("GRASP_APPROACH_ALONG_TOOL", "0") == "1"
-APPROACH_ALONG_TOOL = os.environ.get("GRASP_APPROACH_ALONG_TOOL", "1") == "1"
-
-# GRAPH SEARCH for the free move (see plan_free_move). ON by default: without
-# it a rolled pad whose only IK solution sits on another arm branch is
-# reported unreachable even though the arm can get there through open air.
-ENABLE_GRAPH = os.environ.get("GRASP_ENABLE_GRAPH", "1") == "1"
-print(f"[grid] GRASP_ENABLE_GRAPH = {int(ENABLE_GRAPH)} "
-      f"(free move {'searches joint space, falls back to local' if ENABLE_GRAPH else 'is LOCAL only (old behaviour)'})")
-print(f"[grid] GRASP_APPROACH_ALONG_TOOL = {int(APPROACH_ALONG_TOOL)} "
-      f"(approach/descend along "
-      f"{'the TOOL axis' if APPROACH_ALONG_TOOL else 'world Z'}; "
-      f"tool axis in world = {np.round(APPROACH_AXIS_WORLD, 4).tolist()})")
-
-
-def approach_axis_base():
-    """Unit vector the descent travels along, BASE frame.
-    (0,0,-1) upright, so the flag off and roll zero are the same thing."""
-    return (APPROACH_AXIS_BASE if APPROACH_ALONG_TOOL
-            else np.array([0.0, 0.0, -1.0]))
-
-
-def approach_axis_world():
-    """Same vector in WORLD frame, for building the retreat/UP point."""
-    return (APPROACH_AXIS_WORLD if APPROACH_ALONG_TOOL
-            else np.array([0.0, 0.0, -1.0]))
-
-
-def up_point(grasp_world):
-    """The stand-off pose APPROACH_H BACK along the approach axis.
-
-    Must use the SAME axis as the descent, or the two do not meet: backing off
-    in world Z and then descending along a rolled tool axis lands somewhere
-    else entirely. Upright this is grasp_world + (0, 0, APPROACH_H), exactly
-    as before."""
-    return np.asarray(grasp_world, float) - APPROACH_H * approach_axis_world()
 
 current_grip = [0.0]
 
@@ -995,56 +891,16 @@ def _probe_all(prim_paths):
     return {name: _read_prim_world(pp) for name, pp in prim_paths.items()}
 
 def plan_free_move(start_q, target_base, label):
-    """Point-to-point move through open air to the stand-off pose.
-
-    GRAPH SEARCH (2026-08-06). This used enable_graph=False, which limits
-    cuRobo to LOCAL trajectory optimisation: it takes one straight guess and
-    smooths it. That is fast, and it was fine for years because every grid
-    point sat on the same arm branch as the previous one.
-
-    Rolling the pad broke that. The IK probe on the failed 45 deg point found
-    a perfectly good solution — 0.001 mm pose error — but at
-    shoulder_pan = +1.96 rad, while the arm sits near -0.85 rad. The goal is
-    real and reachable; it is just ~160 deg away in joint space, and a local
-    optimiser cannot cross that gap, so it reported "no IK solution".
-    enable_graph=True makes cuRobo search a route through joint space first
-    and then smooth it, which is what that swing needs.
-
-    ONLY the free move gets this. plan_stitched_z and plan_stitched_line move
-    the pad in 0.8 mm steps while it is near or touching the rod; a graph
-    search there would be free to jump branches mid-contact, which is exactly
-    what those functions exist to prevent.
-
-    The graph attempt is tried FIRST and falls back to the old local plan if
-    it fails, so this cannot do worse than the previous behaviour.
-      GRASP_ENABLE_GRAPH=0  restores the old local-only planning
-    """
     s = JointState.from_position(
             ta.to_device(start_q.astype(np.float32)).view(1, -1),
             joint_names=ARM_JOINT_NAMES)
     g = Pose(position=ta.to_device(target_base.astype(np.float32)).view(1, 3),
              quaternion=ta.to_device(tq.astype(np.float32)).view(1, 4))
-    attempts = ([(True, "graph"), (False, "local")] if ENABLE_GRAPH
-                else [(False, "local")])
-    last = None
-    for use_graph, how in attempts:
-        try:
-            r = mg.plan_single(s, g, MotionGenPlanConfig(
-                max_attempts=5, enable_graph=use_graph))
-        except Exception as e:
-            print(f"  [{label}] free move ({how}) raised "
-                  f"{type(e).__name__}: {e}")
-            continue
-        last = r
-        if r.success.item():
-            if how == "local" and ENABLE_GRAPH:
-                print(f"  [{label}] free move fell back to LOCAL planning")
-            return r.get_interpolated_plan().position.cpu().numpy()
-        if ENABLE_GRAPH:
-            print(f"  [{label}] free move ({how}) failed ({r.status})")
-    print(f"  [{label}] free move FAILED "
-          f"({last.status if last is not None else 'no result'})")
-    return None
+    r = mg.plan_single(s, g, MotionGenPlanConfig(max_attempts=5, enable_graph=False))
+    if not r.success.item():
+        print(f"  [{label}] free move FAILED ({r.status})")
+        return None
+    return r.get_interpolated_plan().position.cpu().numpy()
 
 def plan_stitched_z(start_q, dz, label):
     metric = PoseCostMetric(hold_partial_pose=True,
@@ -1053,16 +909,11 @@ def plan_stitched_z(start_q, dz, label):
     cfg = MotionGenPlanConfig(enable_graph=False, max_attempts=4,
                               enable_finetune_trajopt=False, pose_cost_metric=metric)
     step = dz / N_STEPS
-    # Travel direction. Upright (or flag off) this is (0,0,-1) and
-    # `cpos + (-step)*axis` is identical to the old `cpos[2] += step`, so
-    # nothing changes for existing runs. Rolled with the flag on, it follows
-    # the tool's approach axis — the one CASE13_WEIGHT actually frees.
-    _axis = approach_axis_base()
     cur_q = start_q.copy()
     stitched = []
     for i in range(N_STEPS):
         cpos, cquat = fk(cur_q)
-        tgt = cpos + (-step) * _axis
+        tgt = cpos.copy(); tgt[2] += step
         s = JointState.from_position(
                 ta.to_device(cur_q.astype(np.float32)).view(1, -1),
                 joint_names=ARM_JOINT_NAMES)
@@ -1305,285 +1156,26 @@ def evaluate_reachability(q_start, q_goal, manual_limits=None,
 def _ik_at(target_world, q_seed, label="ik"):
     """Joint solution at an EE world target, tool pointing down.
 
-    Returns (q_goal | None, path_used) where path_used is "direct",
-    "up_then_down" or "failed".
-
     WHY TWO TRIES: the first version planned STRAIGHT from home into the grasp
     pose. The real run never does that — it free-moves to grasp+APPROACH_H and
     THEN does the stitched descent. Planning straight in can fail where
     up-then-down succeeds, which is exactly how pt00 got a FALSE 'unreachable'
     and was skipped. So: try direct (fast), and if it fails, mirror what the run
-    actually does before declaring the point unreachable.
-
-    WHICH PATH SUCCEEDED IS NOW RECORDED (2026-08-06). The executor with
-    direct=False ALWAYS goes up-then-down, so a point certified only by the
-    "direct" branch was certified on a path the run never takes — a known way
-    for the pre-check and the executor to disagree. The ledger counts these."""
+    actually does before declaring the point unreachable."""
     tw = np.asarray(target_world, float)
     tr = plan_free_move(np.asarray(q_seed, float), world_to_base(tw), f"{label}:direct")
     if tr is not None:
-        return np.asarray(tr[-1], float), "direct"
-    up_world = up_point(tw)
+        return np.asarray(tr[-1], float)
+    up_world = tw.copy(); up_world[2] += APPROACH_H
     tr_up = plan_free_move(np.asarray(q_seed, float), world_to_base(up_world),
                            f"{label}:to-up")
     if tr_up is None:
-        return None, "failed"
+        return None
     q_up = np.asarray(tr_up[-1], float)
     tr_dn = plan_stitched_z(q_up, -float(APPROACH_H), f"{label}:down")
     if tr_dn is None:
-        return None, "failed"
-    return np.asarray(tr_dn[-1], float), "up_then_down"
-
-
-# ------------------------------------------------------- reason codes ----
-# "unreachable" was one free-text string covering causes that need completely
-# different responses: a wrist limit, a singular straight-line path, a manual
-# constraint, and a collision are not the same problem. These stable codes
-# separate them so the report can be read at a glance and counted across runs.
-#
-#   ok               nothing objected
-#   ik_no_solution   the planner found no trajectory to the goal pose at all
-#                    (workspace or wrist limit, or collision when the world is
-#                    on — see collision_untested below)
-#   path_infeasible  goal reachable, but the executor's own path could not be
-#                    planned
-#   singularity      straight-line dry-run passes near a singular
-#                    configuration (min_sigma below COND_MAX_WARN)
-#   joint_limit      a joint would leave its absolute limits
-#   manual_limit     frozen_joints / one_sided / delta_bounds / per_iter_dq_cap
-#
-# collision_static is NOT emitted yet: with USE_COLLISION_WORLD = False there
-# is no world to collide with, so nothing here can distinguish "out of reach"
-# from "would hit the table". That separation arrives in Step 3, by planning
-# twice — once with the world and once without.
-REACH_CODES = ("ok", "ik_no_solution", "path_infeasible", "singularity",
-               "joint_limit", "manual_limit", "collision_static")
-
-
-def _reach_reason_code(res, path_used):
-    """Map an evaluate_reachability result onto a stable code."""
-    if res.get("reachable"):
-        return "ok"
-    hits = [str(h) for h in (res.get("limit_hits") or [])]
-    blob = " ".join(hits + [str(res.get("reason", ""))]).lower()
-    if path_used == "failed" or "ik_failed" in blob or "ik/plan failed" in blob:
-        return "ik_no_solution"
-    if "sigma" in blob or "singular" in blob or "cond" in blob:
-        return "singularity"
-    if "abs_limit" in blob or "joint limit" in blob or "limit @" in blob:
-        return "joint_limit"
-    if ("frozen" in blob or "one_sided" in blob or "delta_bounds" in blob
-            or "per_iter_dq_cap" in blob):
-        return "manual_limit"
-    if "tol" in blob or "converge" in blob:
-        return "path_infeasible"
-    return "path_infeasible"
-
-
-# ------------------------------------------------- predicted vs actual ----
-# The pre-check and the executor have disagreed in BOTH directions: points
-# certified reachable whose motion later failed, and points skipped that would
-# probably have worked. Neither was ever recorded, so the disagreement rate is
-# unknown. This ledger writes it down for every point of every run —
-# diagnostic only, it changes no decision.
-EXEC_LEDGER = {}          # index -> {"stage": ..., "ok": bool}
-_REACH_ROWS = {}          # index -> the pre-check row for that point
-
-
-def _tag_index(tag):
-    """'pt07' -> 7. The ledger is keyed by grid index, the executor by tag."""
-    try:
-        return int(str(tag).strip().lower().replace("pt", ""))
-    except Exception:
-        return -1
-
-
-def _ledger(idx, stage, ok):
-    """Record how far a point got. Called at every exit of grasp_one_point."""
-    try:
-        EXEC_LEDGER[int(idx)] = {"stage": str(stage), "ok": bool(ok)}
-    except Exception:
-        pass
-
-
-def write_execution_ledger(out_dir):
-    """Join what the pre-check PREDICTED against what execution DID.
-
-    Four outcomes, and only two of them are agreements:
-      predicted_ok_executed_ok       pre-check right
-      predicted_bad_skipped          pre-check right (unverifiable — the point
-                                     was skipped, so we never learn)
-      predicted_ok_executed_failed   FALSE POSITIVE: certified, then failed
-      predicted_bad_executed_ok      FALSE NEGATIVE: only visible with
-                                     GRASP_REACH_SKIP=0
-    A run with false positives means the pre-check is testing a different path
-    from the executor; false negatives mean it is too strict."""
-    rows, counts = [], {"predicted_ok_executed_ok": 0,
-                        "predicted_ok_executed_failed": 0,
-                        "predicted_bad_executed_ok": 0,
-                        "predicted_bad_skipped": 0,
-                        "not_attempted": 0}
-    for idx in sorted(set(_REACH_ROWS) | set(EXEC_LEDGER)):
-        pre = _REACH_ROWS.get(idx, {})
-        ex = EXEC_LEDGER.get(idx)
-        pred_ok = bool(pre.get("reachable", True))
-        if ex is None:
-            outcome = "predicted_bad_skipped" if not pred_ok else "not_attempted"
-        elif pred_ok and ex["ok"]:
-            outcome = "predicted_ok_executed_ok"
-        elif pred_ok and not ex["ok"]:
-            outcome = "predicted_ok_executed_failed"
-        elif (not pred_ok) and ex["ok"]:
-            outcome = "predicted_bad_executed_ok"
-        else:
-            outcome = "predicted_bad_skipped"
-        counts[outcome] = counts.get(outcome, 0) + 1
-        rows.append({"index": idx, "tag": f"pt{idx:02d}",
-                     "predicted_reachable": pred_ok,
-                     "reason_code": pre.get("reason_code"),
-                     "reason": pre.get("reason"),
-                     "precheck_path": pre.get("precheck_path"),
-                     "executed": (ex or {}).get("ok"),
-                     "exec_stage": (ex or {}).get("stage"),
-                     "outcome": outcome})
-    doc = {"generated": _stamp, "config": _args.config,
-           "grasp_rot_deg": float(ROT_DEG),
-           "use_collision_world": bool(USE_COLLISION_WORLD),
-           "reach_skip": bool(REACH_SKIP),
-           "counts": counts, "points": rows}
-    try:
-        p = os.path.join(out_dir, "execution_ledger.json")
-        with open(p, "w") as f:
-            json.dump(doc, f, indent=2)
-        print(f"[ledger] {counts['predicted_ok_executed_ok']} agreed, "
-              f"{counts['predicted_ok_executed_failed']} FALSE POSITIVE, "
-              f"{counts['predicted_bad_executed_ok']} FALSE NEGATIVE, "
-              f"{counts['predicted_bad_skipped']} skipped -> {p}")
-        if counts["predicted_ok_executed_failed"]:
-            print("[ledger] FALSE POSITIVES mean the pre-check certified a path "
-                  "the executor does not take (see precheck_path).")
-    except Exception as e:
-        print(f"[ledger] write FAILED: {e}")
-    return doc
-
-
-# -------------------------------------------------------- IK PROBE ----
-# WHY (2026-08-06): the 45 deg run failed with reason_code "ik_no_solution"
-# and precheck_path "failed", i.e. mg.plan_single found no trajectory. That
-# does NOT establish that the pose is unreachable — plan_single searches from
-# ONE seed and has to find a whole collision-free trajectory, so it can miss a
-# pose that IK solves easily from a different arm branch.
-#
-# This probe asks the narrower question directly: does ANY joint solution
-# exist for that flange pose? cuRobo's IKSolver is given many random seeds and
-# only has to satisfy the pose, not a path. Three probes, run only on points
-# that already failed, so a healthy run costs nothing:
-#
-#   rolled     the real target      -> if this succeeds, the POSE is fine and
-#                                      the problem is the planner/seed
-#   upright    same position, no roll -> if this succeeds but rolled does not,
-#                                      the ORIENTATION is what cannot be met
-#   pad_only   the pad position with the UNROLLED flange offset
-#                                   -> tells us whether the 111 mm flange
-#                                      swing is what put it out of reach
-#
-# Everything is wrapped: if this cuRobo build exposes a different IK API, the
-# probe reports that and the run continues exactly as before.
-IK_PROBE = os.environ.get("GRASP_IK_PROBE", "1") == "1"
-IK_PROBE_SEEDS = int(os.environ.get("GRASP_IK_PROBE_SEEDS", "400"))
-_ik_solver = [None]          # built lazily, once
-
-
-def _get_ik_solver():
-    """cuRobo IKSolver on the SAME robot + world as the planner, or None."""
-    if _ik_solver[0] is not None:
-        return _ik_solver[0] if _ik_solver[0] is not False else None
-    try:
-        from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
-        cfg = IKSolverConfig.load_from_robot_config(
-            rc, _coll_world, rotation_threshold=0.05, position_threshold=0.002,
-            num_seeds=IK_PROBE_SEEDS, self_collision_check=True,
-            self_collision_opt=True, tensor_args=ta, use_cuda_graph=False)
-        _ik_solver[0] = IKSolver(cfg)
-        print(f"[ikprobe] IKSolver ready ({IK_PROBE_SEEDS} seeds, "
-              f"world={'table slab' if _coll_world is not None else 'None'})")
-    except Exception as e:
-        print(f"[ikprobe] unavailable ({type(e).__name__}: {e}) — probe skipped")
-        _ik_solver[0] = False
         return None
-    return _ik_solver[0]
-
-
-def _ik_try(pos_base, quat, label):
-    """One IK query. Returns a small dict; never raises."""
-    solver = _get_ik_solver()
-    if solver is None:
-        return {"ran": False, "reason": "IKSolver unavailable"}
-    try:
-        g = Pose(position=ta.to_device(np.asarray(pos_base, np.float32)).view(1, 3),
-                 quaternion=ta.to_device(np.asarray(quat, np.float32)).view(1, 4))
-        r = solver.solve_single(g)
-        ok = bool(r.success.view(-1)[0].item())
-        out = {"ran": True, "success": ok}
-        try:
-            out["n_seeds_converged"] = int(r.success.sum().item())
-        except Exception:
-            pass
-        for key, attr in (("pos_err_mm", "position_error"),
-                          ("rot_err_deg", "rotation_error")):
-            try:
-                v = float(getattr(r, attr).view(-1)[0].item())
-                out[key] = v * 1000.0 if attr == "position_error" else \
-                    float(np.degrees(v))
-            except Exception:
-                pass
-        if ok:
-            try:
-                q = r.solution.view(-1, len(ARM_JOINT_NAMES))[0].cpu().numpy()
-                out["q_rad"] = [round(float(v), 6) for v in q]
-            except Exception:
-                pass
-        print(f"  [ikprobe] {label}: {'SOLVED' if ok else 'no solution'}"
-              + (f"  (pos_err {out['pos_err_mm']:.2f} mm)"
-                 if "pos_err_mm" in out else ""))
-        return out
-    except Exception as e:
-        print(f"  [ikprobe] {label}: FAILED ({type(e).__name__}: {e})")
-        return {"ran": False, "reason": f"{type(e).__name__}: {e}"}
-
-
-def ik_probe(ee_world, tag):
-    """Run the three probes for one failed point. Returns a dict for the report."""
-    if not IK_PROBE:
-        return {"ran": False, "reason": "GRASP_IK_PROBE=0"}
-    ee_world = np.asarray(ee_world, float)
-    pad_world = pad_from_ee_target(ee_world)
-    ee_upright = pad_world + np.array([0.0, 0.0, TOOL_OFFSET_Z])
-    out = {
-        "rolled":   _ik_try(world_to_base(ee_world), tq, f"{tag} rolled"),
-        "upright":  _ik_try(world_to_base(ee_world), tq_base, f"{tag} upright-orient"),
-        "pad_only": _ik_try(world_to_base(ee_upright), tq_base, f"{tag} unrolled-flange"),
-    }
-    # one-line verdict, so the JSON does not have to be read to know what to do
-    r, u, p = (out["rolled"].get("success"), out["upright"].get("success"),
-               out["pad_only"].get("success"))
-    if r:
-        v = ("POSE IS REACHABLE — IK solves it, so the PLANNER/seed failed, "
-             "not the geometry")
-    elif u and not r:
-        v = ("position reachable but this ORIENTATION is not — the roll itself "
-             "is what cannot be met at this pose")
-    elif p and not u:
-        v = ("only the UNROLLED flange is reachable — the flange swing from the "
-             "roll is what puts it out of reach")
-    elif r is None:
-        v = "probe did not run"
-    else:
-        v = "nothing reachable here — the pad position itself is out of workspace"
-    out["verdict"] = v
-    print(f"  [ikprobe] {tag} VERDICT: {v}")
-    return out
-
+    return np.asarray(tr_dn[-1], float)
 
 def precheck_reachability(grid_points, q_home):
     """Dry-run EVERY grid point BEFORE any motion. Writes reachability_report.json.
@@ -1606,9 +1198,9 @@ def precheck_reachability(grid_points, q_home):
     for gp in grid_points:
         idx = gp["index"]; tag = f"pt{idx:02d}"
         gw = np.array(gp["world"], float)                  # EE target (world)
-        pad_world = pad_from_ee_target(gw)      # correct at any roll
+        pad_world = [gw[0], gw[1], gw[2] - TOOL_OFFSET_Z]  # the pad target you drew
         _progress(f"[reach] {tag} IK ...")
-        q_goal, path_used = _ik_at(gw, q_seed, f"{tag}:reach-ik")
+        q_goal = _ik_at(gw, q_seed, f"{tag}:reach-ik")
         if q_goal is None:
             res = {"reachable": False, "reason": "IK/plan failed (out of workspace "
                                                  "or no collision-free solution)",
@@ -1623,7 +1215,8 @@ def precheck_reachability(grid_points, q_home):
                 # direct IK can land a flipped arm branch (e.g. shoulder_lift -3.5 rad)
                 # whose straight-line dry-run crosses a singularity. Before giving up,
                 # retry via the up-then-down path the real run actually uses.
-                up = up_point(gw)
+                up = gw.copy();
+                up[2] += APPROACH_H
                 tr_up = plan_free_move(np.asarray(q_seed, float), world_to_base(up),
                                        f"{tag}:retry-up")
                 if tr_up is not None:
@@ -1635,18 +1228,12 @@ def precheck_reachability(grid_points, q_home):
                                                      MANUAL_LIMITS)
                         if res2["reachable"]:
                             q_goal, res = np.asarray(tr_dn[-1], float), res2
-                            path_used = "up_then_down"
+
+
+
 
             if res["reachable"]:
                 q_seed = q_goal          # chain like the real run does
-        # Only failed points get probed, so a healthy run costs nothing.
-        if not res["reachable"]:
-            try:
-                res_probe = ik_probe(gw, tag)
-            except Exception as _pe:
-                res_probe = {"ran": False, "reason": f"{type(_pe).__name__}: {_pe}"}
-        else:
-            res_probe = None
         ok_map[idx] = bool(res["reachable"])
         row = {"index": idx,
                "pad_offset_y_mm": gp["dy_mm"], "pad_offset_z_mm": gp["dz_mm"],
@@ -1654,55 +1241,20 @@ def precheck_reachability(grid_points, q_home):
                "ee_target_world_mm":  [round(v*1000, 2) for v in gw.tolist()],
                "q_goal_rad": (q_goal.tolist() if q_goal is not None else None)}
         row.update(res)
-        # stable code + which path proved it (see _ik_at). "direct" means the
-        # executor's own path was never tested for this point.
-        row["reason_code"] = _reach_reason_code(res, path_used)
-        row["precheck_path"] = path_used
-        if res_probe is not None:
-            row["ik_probe"] = res_probe
-            row["ik_probe_verdict"] = res_probe.get("verdict")
-        _REACH_ROWS[idx] = row
         report["points"].append(row)
         mark = "OK " if res["reachable"] else "XX "
         print(f"  {mark}{tag}  pad(y={gp['dy_mm']:+.1f}, z={gp['dz_mm']:+.1f}) "
-              f"-> [{row['reason_code']}] {res['reason']}  "
-              f"(path: {path_used})")
+              f"-> {res['reason']}")
 
     n_ok = sum(1 for v in ok_map.values() if v)
     report["n_points"] = len(grid_points)
     report["n_reachable"] = n_ok
     report["n_unreachable"] = len(grid_points) - n_ok
-    # counts per cause, so a run's failures can be read without opening the
-    # per-point rows: 12 x singularity is a different problem from 12 x
-    # ik_no_solution and needs a different fix.
-    by_code, by_path = {}, {}
-    for r in report["points"]:
-        by_code[r.get("reason_code", "?")] = by_code.get(r.get("reason_code", "?"), 0) + 1
-        by_path[r.get("precheck_path", "?")] = by_path.get(r.get("precheck_path", "?"), 0) + 1
-    report["by_reason_code"] = by_code
-    report["by_precheck_path"] = by_path
-    report["grasp_rot_deg"] = float(ROT_DEG)
-    report["use_collision_world"] = bool(USE_COLLISION_WORLD)
-    report["collision_untested"] = (not USE_COLLISION_WORLD)
     out = os.path.join(OUTPUT_DIR, "reachability_report.json")
     try:
         with open(out, "w") as f:
             json.dump(report, f, indent=2)
         print(f"[reach] {n_ok}/{len(grid_points)} reachable. report -> {out}")
-        print("[reach] by cause: "
-              + ", ".join(f"{k}={v}" for k, v in sorted(by_code.items())))
-        _n_direct = by_path.get("direct", 0)
-        if _n_direct:
-            print(f"[reach] {_n_direct} point(s) certified via the DIRECT plan "
-                  f"only — the executor uses up-then-down, so those were "
-                  f"proved on a path the run does not take.")
-        if not USE_COLLISION_WORLD:
-            print("[reach] NOTE: USE_COLLISION_WORLD=False, so nothing was "
-                  "collision-checked - 'reachable' here does NOT mean lab-safe.")
-        _verdicts = [r.get("ik_probe_verdict") for r in report["points"]
-                     if r.get("ik_probe_verdict")]
-        for _v in sorted(set(_verdicts)):
-            print(f"[ikprobe] {_verdicts.count(_v)} point(s): {_v}")
     except Exception as e:
         print(f"[reach] report write FAILED: {e}")
     # also drop a copy next to the config so the GUI always finds the newest
@@ -1792,7 +1344,7 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
                     Paper-2 stitched descent.
     retreat=True -> ascend APPROACH_H at the end (used for the LAST point, or
                     whenever point-to-point is off)."""
-    up_world = up_point(grasp_world)
+    up_world = grasp_world.copy(); up_world[2] += APPROACH_H
     up_base  = world_to_base(up_world)
 
     approached = False
@@ -1820,8 +1372,7 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
         traj_up = plan_free_move(q_start, up_base, f"{tag}:to-up")
         if traj_up is None:
             _progress(f"{tag} free-move PLAN FAILED")
-            print(f"[{tag}] FAILED to reach UP.")
-            _ledger(_tag_index(tag), "free_move_to_up", False); return False
+            print(f"[{tag}] FAILED to reach UP."); return False
         _progress(f"{tag} free-move EXEC start ({len(traj_up)} wpts, "
                   f"max|dq|={float(np.max(np.abs(traj_up[-1]-traj_up[0]))):.3f} rad)")
         run_traj(traj_up)
@@ -1834,8 +1385,7 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
         traj_dn = plan_stitched_z(q_up, dz_dn, f"{tag}:DOWN")
         if traj_dn is None:
             _progress(f"{tag} descent PLAN FAILED")
-            print(f"[{tag}] descent FAILED.")
-            _ledger(_tag_index(tag), "stitched_descent", False); return False
+            print(f"[{tag}] descent FAILED."); return False
         _progress(f"{tag} descent EXEC start ({len(traj_dn)} wpts)")
         run_traj(traj_dn)
         _progress(f"{tag} descent EXEC done")
@@ -2138,7 +1688,6 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
             f.write(header); f.writelines(body[prev:])
         row_marks[s] = len(body)
         print(f"[{tag}] saved {os.path.basename(dst)} ({len(body)-prev} rows)")
-    _ledger(_tag_index(tag), "complete", True)
     return True
 
 EXIT_CODE = 0
@@ -2204,23 +1753,8 @@ try:
     import json as _json, shutil as _sh
     with open(os.path.join(OUTPUT_DIR, "pose_history.json"), "w") as f:
         _json.dump({"points": pose_hist, "config": CONFIG}, f, indent=2)
-    # what the pre-check predicted vs what the run actually did (diagnostic)
-    try:
-        write_execution_ledger(OUTPUT_DIR)
-    except Exception as _e:
-        print(f"[ledger] skipped ({_e})")
     try:
         _sh.copy(_args.config, os.path.join(OUTPUT_DIR, "gui_config_used.json"))
-    except Exception:
-        pass
-    # The GUI writes its 3-panel preview next to the config every time you press
-    # Save Config / Save + Show Run Command. Copy it in so each run folder shows
-    # the grid design that produced it, with no screenshot needed.
-    try:
-        _prev = os.path.join(os.path.dirname(_args.config), "gui_preview.png")
-        if os.path.isfile(_prev):
-            _sh.copy(_prev, os.path.join(OUTPUT_DIR, "gui_preview.png"))
-            print(f"[cfg] gui_preview.png copied into the run folder")
     except Exception:
         pass
     print(f"\n[cfg] DONE. {n_ok}/{len(GRID_POINTS)} grasps OK. Data in {OUTPUT_DIR}")

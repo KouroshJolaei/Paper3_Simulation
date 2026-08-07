@@ -154,16 +154,6 @@ def plot_run(run_dir, out_png=None):
                 vmax = max(vmax, float(np.max(results[tg][sensor]["snapshots"][key])))
         if vmax <= 0:
             vmax = 1.0
-        # Colour policy from stitching.py (2026-08-04). This module already
-        # shared one scale across the run; now a FIXED ceiling can override it
-        # so panels stay comparable across different tests too.
-        _run_vmax = vmax
-        try:
-            vmax, _scale_lbl = _ST.resolve_vmax(vmax, _run_vmax)
-        except Exception:
-            _scale_lbl = f"shared across run, vmax={vmax:.0f}"
-        if vmax <= 0:
-            vmax = 1.0
         fig = Figure(figsize=(2.2*4 + 1.8, 2.0*len(rows) + 1))
         FigureCanvasAgg(fig)
         _im = None
@@ -187,7 +177,8 @@ def plot_run(run_dir, out_png=None):
                 ax.set_xticks([]); ax.set_yticks([])
         if _im is not None:
             cb = fig.colorbar(_im, ax=fig.axes, shrink=0.85)
-            cb.set_label(f"pressure (a.u.) — {_scale_lbl}", fontsize=8)
+            cb.set_label(f"pressure (a.u.) — shared scale, vmax={vmax:.0f}",
+                         fontsize=8)
         fig.suptitle(f"Temporal snapshots — {sensor}{' [mirrored]' if (sensor=='s2' and MIRROR_S2) else ''} (rows=grasps, cols=squeeze stages; ONE colour scale)",
                      fontsize=11)
         png = os.path.join(run_dir, f"temporal_snapshots_{sensor}.png")
@@ -209,29 +200,12 @@ def plot_per_grasp(run_dir, results=None):
     labels = ["p05", "p50", "p95", "post3s"]
     titles = ["5% (contact)", "50%", "95% (full)", "+3 s"]
     out_dir = os.path.join(run_dir, "Temporal_Per_Grasp")
-    # run-wide ceiling for "shared" mode (max over every grasp/stage/sensor)
-    _run_peak_t = 0.0
-    for _tg in results:
-        for _sn in results[_tg]:
-            for _k in labels:
-                try:
-                    _run_peak_t = max(_run_peak_t,
-                                      float(np.max(results[_tg][_sn]["snapshots"][_k])))
-                except Exception:
-                    pass
     made = []
     for tg in sorted(results.keys()):
         entry = results[tg]
         os.makedirs(out_dir, exist_ok=True)
         vmax = max((float(np.max(entry[s]["snapshots"][k]))
                     for s in entry for k in labels), default=1.0)
-        if vmax <= 0:
-            vmax = 1.0
-        _grasp_max = vmax
-        try:
-            vmax, _ = _ST.resolve_vmax(vmax, _run_peak_t)
-        except Exception:
-            pass
         if vmax <= 0:
             vmax = 1.0
         fig = Figure(figsize=(2.3*4 + 0.8, 2.2*2 + 0.9))
@@ -249,8 +223,7 @@ def plot_per_grasp(run_dir, results=None):
                 # ax.imshow(_mp, cmap="jet", aspect="auto",
                 #           vmin=0.0, vmax=vmax)
                 ax.imshow(_mp, cmap="jet", aspect="auto", vmin=0.0, vmax=vmax, origin="lower")  # plot_per_grasp
-                ttl = (f"{sensor}  {titles[c]}\nsum {meta[key]['sum']:.0f}"
-                       f"  max {float(np.max(_mp)):.0f}")
+                ttl = f"{sensor}  {titles[c]}\nsum {meta[key]['sum']:.0f}"
                 if key == "post3s" and not meta["post3s_valid"]:
                     ttl += " (needs 3s hold)"
                 ax.set_title(ttl, fontsize=7)

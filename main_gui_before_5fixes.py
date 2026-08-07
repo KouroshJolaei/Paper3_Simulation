@@ -48,15 +48,6 @@ ROBOT_BASE_MM = np.array([20.93, -337.5, 992.75])  # robot base_link world (mm)
 # ---- paths for the config-save + Isaac-launch bridge (Stage B) ----
 PROJECT   = os.path.expanduser("~/Paper3_Simulation")
 CONFIG_JSON = os.path.join(PROJECT, "Data", "gui_config.json")
-# 3-panel preview snapshot, written next to the config on every save. The
-# collector copies it into the run folder so each run carries a picture of the
-# grid design it was launched with (added 2026-08-04).
-PREVIEW_PNG = os.path.join(PROJECT, "Data", "gui_preview.png")
-# colour-scale policy shared with stitching.py / heatmaps.py / temporal_snapshots.py
-PLOT_SCALE_JSON = os.path.join(PROJECT, "Data", "plot_scale.json")
-# Reachability dry-runs used to land in Data/gui_run beside real data runs,
-# so every test produced two folders. They now go to their own directory.
-REACH_OUT_DIR = os.path.join(PROJECT, "Data", "reach_check")
 CALIB_CONFIG_JSON = os.path.join(PROJECT, "Data", "gui_calib_config.json")
 ISAAC_PY  = os.path.expanduser("~/isaacsim/python.sh")
 COLLECT_PY = os.path.join(PROJECT, "sim", "collect_from_config.py")
@@ -147,17 +138,7 @@ class CockpitGUI:
             # finger-joint angle to squeeze to during calibration.
             # blank = let the collector decide (stored value, else 26 mm value)
             "calib_close_rad": tk.StringVar(value=""),
-            "stitch_want_gsr": tk.BooleanVar(value=False),
-            # Stitch-tab: append the blob-axis metric self-test to the report
-            "blob_selftest": tk.BooleanVar(value=False),
-            # Stitch-tab: fit the contact band width from the run's own maps
-            "blob_fit_width": tk.BooleanVar(value=False),
-            # ---- colour-scale policy (2026-08-04) ----
-            # Written to Data/plot_scale.json and read by stitching.py,
-            # heatmaps.py and temporal_snapshots.py, so every figure in the
-            # project is scaled the same way.
-            "scale_shared": tk.BooleanVar(value=True),
-            "scale_fixed":  tk.StringVar(value=""),   # blank = not fixed  # Stitch-tab: include GSR in validation
+            "stitch_want_gsr": tk.BooleanVar(value=False),  # Stitch-tab: include GSR in validation
         }
 
         # ---- Notebook: tab 1 = collection cockpit, tab 2 = stitching ----
@@ -222,32 +203,6 @@ class CockpitGUI:
 
         self._inputs_canvas = _cv          # kept for later resizing
         r = 0
-
-        # ---------------- SESSION FOLDER (added 2026-08-04) ----------------
-        # One folder per test. Before this, the reachability dry-run and the
-        # real run each minted their own timestamp, so a single test produced
-        # two folders minutes apart. Now the GUI decides the name ONCE and
-        # passes it to both via GRASP_RUN_DIR, and that folder is also the
-        # default for loading configs and for re-plotting heatmaps/stitches.
-        ttk.Label(frm, text="SESSION FOLDER (one per test)",
-                  font=("", 10, "bold")).grid(row=r, column=0, columnspan=2,
-                                              sticky="w"); r += 1
-        self.session_lbl = ttk.Label(frm, text="(none)", foreground="#06a",
-                                     wraplength=430, justify="left")
-        self.session_lbl.grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
-        _sf = ttk.Frame(frm); _sf.grid(row=r, column=0, columnspan=2,
-                                       sticky="ew", pady=(2, 6)); r += 1
-        ttk.Button(_sf, text="New session (stamp + angles)",
-                   command=self.new_session).pack(side="left")
-        ttk.Button(_sf, text="Use existing...",
-                   command=self.pick_session).pack(side="left", padx=4)
-        ttk.Button(_sf, text="Open folder",
-                   command=self.open_session_folder).pack(side="left")
-        ttk.Label(frm, text="(the folder name is fixed when you press New "
-                            "session; press it again after changing angles)",
-                  foreground="#888", wraplength=430,
-                  justify="left").grid(row=r, column=0, columnspan=2,
-                                       sticky="w"); r += 1
 
         ttk.Label(frm, text="OBJECT pose (world, mm)",
                   font=("", 10, "bold")).grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
@@ -346,27 +301,6 @@ class CockpitGUI:
         ttk.Label(frm, text="AFTER the run:", font=("", 9, "bold")).grid(
             row=r, column=0, columnspan=2, sticky="w"); r += 1
         # plot source: newest run (default) OR a saved folder you pick
-        # ---------------- COLOUR SCALE (added 2026-08-04) ----------------
-        ttk.Label(frm, text="COLOUR SCALE (all heatmaps / stitches / temporal)",
-                  font=("", 9, "bold")).grid(row=r, column=0, columnspan=2,
-                                             sticky="w", pady=(8, 0)); r += 1
-        ttk.Checkbutton(frm, text="one scale across the whole run",
-                        variable=self.vars["scale_shared"],
-                        command=self.save_plot_scale).grid(
-            row=r, column=0, columnspan=2, sticky="w"); r += 1
-        _cs = ttk.Frame(frm); _cs.grid(row=r, column=0, columnspan=2,
-                                       sticky="w"); r += 1
-        ttk.Label(_cs, text="fixed max (blank = off):").pack(side="left")
-        _ce = ttk.Entry(_cs, textvariable=self.vars["scale_fixed"], width=8)
-        _ce.pack(side="left", padx=4)
-        _ce.bind("<Return>", lambda ev: self.save_plot_scale())
-        ttk.Button(_cs, text="Apply", command=self.save_plot_scale).pack(side="left")
-        ttk.Label(frm, text="(fixed max makes DIFFERENT tests comparable; "
-                            "2400 matches Paper 2's tactile counts)",
-                  foreground="#888", wraplength=430,
-                  justify="left").grid(row=r, column=0, columnspan=2,
-                                       sticky="w"); r += 1
-
         ttk.Button(frm, text="Plot from folder…", command=self.choose_plot_folder).grid(
             row=r, column=0, pady=2, sticky="ew")
         ttk.Button(frm, text="Use newest", command=self.use_newest_run).grid(
@@ -747,36 +681,8 @@ class CockpitGUI:
         os.makedirs(os.path.dirname(CONFIG_JSON), exist_ok=True)
         with open(CONFIG_JSON, "w") as f:
             json.dump(cfg, f, indent=2)
-        # Snapshot the three preview plots next to the config. The collector
-        # copies BOTH into the run folder, so no manual screenshots are needed.
-        try:
-            self.fig.savefig(PREVIEW_PNG, dpi=110, bbox_inches="tight")
-            _png_note = "\npreview image saved"
-        except Exception as e:
-            _png_note = f"\n(preview image NOT saved: {e})"
-
-        # ALSO drop both straight into the session folder, so pressing Save
-        # Config is enough — you no longer have to run the grid before the
-        # folder has a record of what you set up (fixed 2026-08-04).
-        _sess_note = ""
-        _sess = self._session_or_none()
-        if _sess:
-            try:
-                os.makedirs(_sess, exist_ok=True)
-                with open(os.path.join(_sess, "gui_config_used.json"), "w") as f:
-                    json.dump(cfg, f, indent=2)
-                try:
-                    self.fig.savefig(os.path.join(_sess, "gui_preview.png"),
-                                     dpi=110, bbox_inches="tight")
-                except Exception:
-                    pass
-                _sess_note = "\nalso saved into session folder"
-            except Exception as e:
-                _sess_note = f"\n(session copy failed: {e})"
-
         self.status.config(
-            text=f"saved config: {cfg['grid']['n_points']} points\n{CONFIG_JSON}"
-                 + _png_note + _sess_note,
+            text=f"saved config: {cfg['grid']['n_points']} points\n{CONFIG_JSON}",
             foreground="#0a6")
         return cfg
 
@@ -806,83 +712,25 @@ class CockpitGUI:
                            foreground="#0a6")
 
     def load_experiment(self):
-        """Load a saved recipe OR a plain config back into the GUI fields.
-
-        THREE file shapes are accepted, because all three describe a run:
-          1. an experiment recipe from "Save Experiment As..."   (gui_fields)
-          2. Data/gui_config.json                                (built config)
-          3. a run folder's gui_config_used.json / pose_history.json
-        Before 2026-08-04 only (1) worked: picking a config set NOTHING and
-        still reported success in green, which is why the button looked broken.
-        Now (2) and (3) are mapped back onto the fields, and a file that
-        matches nothing says so instead of pretending.
-        """
+        """Load a saved experiment recipe back into the GUI fields."""
         from tkinter import filedialog
         exp_dir = os.path.join(PROJECT, "Data", "experiments")
         path = filedialog.askopenfilename(
-            initialdir=(self._session_or_none() or
-                        (exp_dir if os.path.isdir(exp_dir)
-                         else os.path.join(PROJECT, "Data"))),
-            filetypes=[("Experiment or config JSON", "*.json"), ("All", "*.*")],
-            title="Load experiment recipe or config")
+            initialdir=exp_dir if os.path.isdir(exp_dir) else PROJECT,
+            filetypes=[("Experiment JSON", "*.json"), ("All", "*.*")],
+            title="Load experiment recipe")
         if not path:
             return
         try:
             with open(path) as f:
-                doc = json.load(f)
-
-            # pose_history.json nests the config one level down
-            if "gui_fields" not in doc and isinstance(doc.get("config"), dict):
-                doc = doc["config"]
-
-            fields, src = {}, ""
-            if isinstance(doc.get("gui_fields"), dict):
-                fields, src = dict(doc["gui_fields"]), "experiment recipe"
-            elif "object" in doc and "grid" in doc:
-                o = doc.get("object", {}) or {}
-                p = doc.get("pad", {}) or {}
-                g = doc.get("grid", {}) or {}
-                c = list(o.get("center_world_mm", [None, None, None]))
-                fields = {
-                    "obj_x": c[0], "obj_y": c[1], "obj_z": c[2],
-                    "obj_diam": o.get("diameter_mm"),
-                    "obj_len": o.get("length_mm"),
-                    "obj_tilt_deg": o.get("tilt_deg"),
-                    "obj_tilt_axis": o.get("tilt_axis"),
-                    "pad_dy": p.get("base_offset_y_mm"),
-                    "pad_dz": p.get("base_offset_z_mm"),
-                    "pad_rot": p.get("rotation_deg", 0.0),
-                    "grid_nx": g.get("nx"), "grid_ny": g.get("ny"),
-                    "grid_step": g.get("step_mm"),
-                }
-                fields = {k: v for k, v in fields.items() if v is not None}
-                src = "config"
-
-            n = 0
+                recipe = json.load(f)
+            fields = recipe.get("gui_fields", {})
             for k, v in fields.items():
                 if k in self.vars:
-                    self.vars[k].set(f"{v:g}" if isinstance(v, float) else v)
-                    n += 1
-            if src == "config" and "grid_centered" in self.vars:
-                self.vars["grid_centered"].set(
-                    bool((doc.get("grid") or {}).get("centered", False)))
-                n += 1
-
-            if n == 0:
-                messagebox.showwarning(
-                    "Load",
-                    "Nothing loaded — that file has no GUI fields and no "
-                    "object/grid blocks I can read.\n\nPick an experiment recipe "
-                    "from Data/experiments, Data/gui_config.json, or a run's "
-                    "gui_config_used.json.")
-                self.status.config(text="nothing loaded from that file",
-                                   foreground="#b00")
-                return
-
+                    self.vars[k].set(v)
             self.refresh()
-            self.status.config(
-                text=f"{src} loaded ({n} fields):\n{os.path.basename(path)}",
-                foreground="#0a6")
+            self.status.config(text="experiment loaded:\n" + os.path.basename(path),
+                               foreground="#0a6")
         except Exception as e:
             messagebox.showerror("Experiment", "Could not load:\n%s" % e)
 
@@ -893,12 +741,10 @@ class CockpitGUI:
         # the exact, proven terminal command (this is what worked for you)
         headless = "1" if self.vars["headless"].get() else "0"
         _rot = cfg.get("pad", {}).get("rotation_deg", 0.0)
-        _sess = self._session_or_none()
         cmd = (
             f"cd {EXAMPLES_DIR} && \\\n"
-            + (f'GRASP_RUN_DIR="{_sess}" \\\n' if _sess else
-               f'GRASP_OUTPUT_DIR="$HOME/Paper3_Simulation/Data/gui_run" \\\n')
-            + f'GRASP_BASENAME="gui" \\\n'
+            f'GRASP_OUTPUT_DIR="$HOME/Paper3_Simulation/Data/gui_run" \\\n'
+            f'GRASP_BASENAME="gui" \\\n'
             f'GRASP_HEADLESS="{headless}" \\\n'
             + (f'GRASP_ROT_DEG="{_rot:g}" \\\n'
                f'GRASP_ROT_AXIS="y" \\\n' if abs(_rot) > 1e-6 else "")
@@ -931,10 +777,8 @@ class CockpitGUI:
         _rot = cfg.get("pad", {}).get("rotation_deg", 0.0)
         cmd = (
             f"cd {EXAMPLES_DIR} && \\\n"
-            + (f'GRASP_RUN_DIR="{self._session_or_none()}" \\\n'
-               if self._session_or_none() else
-               f'GRASP_OUTPUT_DIR="$HOME/Paper3_Simulation/Data/reach_check" \\\n')
-            + f'GRASP_BASENAME="reach" \\\n'
+            f'GRASP_OUTPUT_DIR="$HOME/Paper3_Simulation/Data/gui_run" \\\n'
+            f'GRASP_BASENAME="reach" \\\n'
             f'GRASP_HEADLESS="{headless}" \\\n'
             f'GRASP_REACH_ONLY="1" \\\n'
             + (f'GRASP_ROT_DEG="{_rot:g}" \\\n'
@@ -1372,14 +1216,11 @@ class CockpitGUI:
 
     # ---------- Stage C: read-back heatmaps + pose history ----------
     def _run_dir(self):
-        # Priority: an explicit "Plot from folder..." override, then the active
-        # SESSION folder, then the newest run on disk.
+        # If the user picked a folder to re-plot from, use it. Otherwise the
+        # collector writes to gui_run/run_<timestamp>/ — pick the newest.
         forced = getattr(self, "_forced_run_dir", None)
         if forced:
             return forced
-        sess = getattr(self, "_session_dir", None)
-        if sess and os.path.isdir(sess):
-            return sess
         import glob
         base = os.path.join(PROJECT, "Data", "gui_run")
         runs = sorted(glob.glob(os.path.join(base, "run_*")))
@@ -1387,126 +1228,12 @@ class CockpitGUI:
             return runs[-1]          # newest run
         return base                   # fallback (old flat layout)
 
-    def save_plot_scale(self):
-        """Write Data/plot_scale.json — read by stitching / heatmaps /
-        temporal_snapshots so the GUI and standalone runs agree."""
-        raw = self.vars["scale_fixed"].get().strip()
-        fixed = None
-        if raw:
-            try:
-                fixed = float(raw)
-                if fixed <= 0:
-                    fixed = None
-            except ValueError:
-                messagebox.showerror("Colour scale",
-                                     "Fixed max must be a number (or blank).")
-                return
-        doc = {"shared": bool(self.vars["scale_shared"].get()),
-               "fixed_vmax": fixed}
-        try:
-            os.makedirs(os.path.dirname(PLOT_SCALE_JSON), exist_ok=True)
-            with open(PLOT_SCALE_JSON, "w") as f:
-                json.dump(doc, f, indent=2)
-        except Exception as e:
-            messagebox.showerror("Colour scale", "Could not save:\n%s" % e)
-            return
-        mode = (f"fixed {fixed:g}" if fixed is not None
-                else ("shared across run" if doc["shared"] else "auto per figure"))
-        self.status.config(text="colour scale: " + mode + "\n(replot to apply)",
-                           foreground="#0a6")
-
-    # ================= Session folder =================
-    @staticmethod
-    def _ang_tag(v):
-        """Angle -> filename-safe token. -10 -> 'm10', 35.5 -> '35p5'."""
-        try:
-            v = float(v)
-        except (TypeError, ValueError):
-            v = 0.0
-        s = f"{abs(v):g}".replace(".", "p")
-        return ("m" + s) if v < 0 else s
-
-    def _session_name(self):
-        import datetime
-        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        obj = self._ang_tag(self.vars["obj_tilt_deg"].get())
-        pad = self._ang_tag(self.vars["pad_rot"].get())
-        return f"run_{stamp}_obj{obj}_pad{pad}"
-
-    def new_session(self):
-        """Mint a new session folder from the clock and the current angles.
-        Everything after this — reachability, the run, heatmaps, stitching —
-        lands in this one folder."""
-        path = os.path.join(PROJECT, "Data", "gui_run", self._session_name())
-        try:
-            os.makedirs(path, exist_ok=True)
-        except Exception as e:
-            messagebox.showerror("Session", "Could not create folder:\n%s" % e)
-            return
-        self._session_dir = path
-        self._forced_run_dir = None      # session takes over as the plot source
-        self._stitch_dir = None
-        self.session_lbl.config(text=os.path.basename(path), foreground="#06a")
-        if hasattr(self, "plot_src_lbl"):
-            self.plot_src_lbl.config(text="plot source: session folder",
-                                     foreground="#06a")
-        if hasattr(self, "stitch_run_lbl"):
-            self.stitch_run_lbl.config(text=os.path.basename(path))
-        self.status.config(text="new session:\n" + path, foreground="#0a6")
-
-    def pick_session(self):
-        """Point the session at an existing run folder (to re-plot or re-stitch)."""
-        from tkinter import filedialog
-        d = filedialog.askdirectory(
-            initialdir=os.path.join(PROJECT, "Data", "gui_run"),
-            title="Pick an existing run folder to use as the session")
-        if not d:
-            return
-        self._session_dir = d
-        self._forced_run_dir = None
-        self._stitch_dir = None
-        self.session_lbl.config(text=os.path.basename(d), foreground="#06a")
-        if hasattr(self, "plot_src_lbl"):
-            self.plot_src_lbl.config(text="plot source: session folder",
-                                     foreground="#06a")
-        if hasattr(self, "stitch_run_lbl"):
-            self.stitch_run_lbl.config(text=os.path.basename(d))
-        self.status.config(text="session set to:\n" + d, foreground="#0a6")
-
-    def open_session_folder(self):
-        """Open the active plot/session folder in the desktop file manager.
-        Falls back to the folder the plot buttons are pointing at, so this
-        works even before a session has been minted."""
-        import subprocess, sys
-        path = self._session_or_none() or self._run_dir()
-        if not path or not os.path.isdir(path):
-            messagebox.showinfo(
-                "Open folder",
-                "No folder to open yet.\n\nPress 'New session' first, or run a "
-                "grid so there is something on disk.")
-            return
-        try:
-            if sys.platform.startswith("darwin"):
-                subprocess.Popen(["open", path])
-            elif os.name == "nt":
-                os.startfile(path)                        # noqa: S606
-            else:
-                subprocess.Popen(["xdg-open", path])
-            self.status.config(text="opened:\n" + path, foreground="#0a6")
-        except Exception as e:
-            messagebox.showerror("Open folder",
-                                 f"Could not open:\n{path}\n\n{e}")
-
-    def _session_or_none(self):
-        return getattr(self, "_session_dir", None)
-
     def choose_plot_folder(self):
         """Pick a saved run folder to (re)generate plots from. All four plot
         buttons then read from — and save back into — this folder."""
         from tkinter import filedialog
         d = filedialog.askdirectory(
-            initialdir=(self._session_or_none()
-                        or os.path.join(PROJECT, "Data", "gui_run")),
+            initialdir=os.path.join(PROJECT, "Data", "gui_run"),
             title="Pick a run folder to plot from")
         if d:
             self._forced_run_dir = d
@@ -1747,40 +1474,6 @@ class CockpitGUI:
                    command=self.do_validate).grid(
             row=r, column=0, columnspan=3, sticky="ew", pady=(4, 3)); r += 1
 
-        # ---- contact-blob orientation: measured axis vs the grid design ----
-        ttk.Separator(frm, orient="horizontal").grid(
-            row=r, column=0, columnspan=3, sticky="ew", pady=(10, 6)); r += 1
-        ttk.Label(frm, text="BLOB AXIS — contact angle vs design",
-                  font=("", 9, "bold")).grid(row=r, column=0, columnspan=3,
-                                             sticky="w"); r += 1
-        ttk.Label(frm, justify="left", foreground="#555", wraplength=430, text=(
-            "Per grasp, the weighted-PCA principal axis of the contact blob\n"
-            "(Paper 2's own method), against the angle the GEOMETRY implies:\n"
-            "the contact band clipped by the pad window, put through the same\n"
-            "7x4 estimator. Offsets matter — a tilted band pushed off-centre\n"
-            "is only partly visible, and a short piece of a tilted line reads\n"
-            "much straighter than the line itself, so 'expected' is often far\n"
-            "from the rod tilt. Everything comes from this run's own folder.\n"
-            "Per grasp, not on the stitched map — on a 1xN sweep the stitched\n"
-            "blob's shape is set by the stepping direction, not the contact.")
-                  ).grid(row=r, column=0, columnspan=3, sticky="w",
-                         pady=(0, 4)); r += 1
-        ttk.Label(frm, text="contact band width (mm)").grid(row=r, column=0,
-                                                            sticky="e")
-        self.vars["blob_band_mm"] = tk.StringVar(value="8.0")
-        ttk.Entry(frm, textvariable=self.vars["blob_band_mm"], width=8).grid(
-            row=r, column=1, sticky="w", padx=4); r += 1
-        ttk.Checkbutton(frm, text="fit band width from this run's own maps",
-                        variable=self.vars["blob_fit_width"]).grid(
-            row=r, column=0, columnspan=3, sticky="w"); r += 1
-        ttk.Checkbutton(frm, text="also show the metric self-test "
-                                  "(ideal line contact -> what PCA reads)",
-                        variable=self.vars["blob_selftest"]).grid(
-            row=r, column=0, columnspan=3, sticky="w"); r += 1
-        ttk.Button(frm, text="Blob Axis (measured vs expected)",
-                   command=self.do_blob_axis).grid(
-            row=r, column=0, columnspan=3, sticky="ew", pady=(4, 3)); r += 1
-
         self.stitch_status = ttk.Label(frm, text="", foreground="#0a6",
                                        wraplength=430, justify="left")
         self.stitch_status.grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0)); r += 1
@@ -1791,8 +1484,7 @@ class CockpitGUI:
     def _stitch_browse(self):
         from tkinter import filedialog
         d = filedialog.askdirectory(
-            initialdir=(self._session_or_none()
-                        or os.path.join(PROJECT, "Data", "gui_run")),
+            initialdir=os.path.join(PROJECT, "Data", "gui_run"),
             title="Pick a run folder")
         if d:
             self._stitch_dir = d
@@ -1826,23 +1518,6 @@ class CockpitGUI:
                 if d not in sys.path:
                     sys.path.insert(0, d)
                 spec = importlib.util.spec_from_file_location("validation", cand)
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                return mod
-        return None
-
-    def _load_blob_module(self):
-        """Load viz/blob_axis.py. Like validation.py it imports stitching.py
-        itself, so the viz/ dir has to be on sys.path first."""
-        import importlib.util, sys
-        for cand in (os.path.join(PROJECT, "viz", "blob_axis.py"),
-                     os.path.join(PROJECT, "blob_axis.py"),
-                     os.path.join(PROJECT, "sim", "blob_axis.py")):
-            if os.path.exists(cand):
-                d = os.path.dirname(cand)
-                if d not in sys.path:
-                    sys.path.insert(0, d)
-                spec = importlib.util.spec_from_file_location("blob_axis", cand)
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
                 return mod
@@ -1934,82 +1609,6 @@ class CockpitGUI:
                     "Validate", "Validation failed:\n\n" + tb))
 
         threading.Thread(target=_worker, daemon=True).start()
-
-    def do_blob_axis(self):
-        """Per-grasp contact-blob orientation vs the angle the grid design
-        implies. Threaded because it re-reads every grasp's CSV."""
-        import traceback
-        run = self._stitch_target_dir()
-        selftest = bool(self.vars["blob_selftest"].get())
-        fit_w = bool(self.vars["blob_fit_width"].get())
-        try:
-            band = float(self.vars["blob_band_mm"].get())
-        except Exception:
-            band = 8.0
-        self.stitch_status.config(text="measuring blob axis…",
-                                  foreground="#06a")
-
-        def _worker():
-            try:
-                mod = self._load_blob_module()
-                if mod is None:
-                    self.root.after(0, lambda: messagebox.showerror(
-                        "Blob Axis",
-                        "blob_axis.py not found (expected in viz/)."))
-                    return
-                report, pngs = mod.blob_and_save(
-                    run, band_width_mm=band, fit_width=fit_w)
-                if selftest:
-                    report = report + "\n\n" + mod.metric_selftest()
-                self.root.after(0, lambda: self._show_blob_report(
-                    run, report, pngs))
-            except Exception:
-                tb = traceback.format_exc()
-                self.root.after(0, lambda: messagebox.showerror(
-                    "Blob Axis", "Blob axis failed:\n\n" + tb))
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _show_blob_report(self, run, report, pngs):
-        self._show_report_window("Blob axis — " + os.path.basename(run),
-                                 report)
-        try:
-            import matplotlib.pyplot as plt
-            import matplotlib.image as mpimg
-            for png in pngs:
-                fig = plt.figure(figsize=(12.5, 4.4))
-                ax = fig.add_subplot(1, 1, 1)
-                ax.imshow(mpimg.imread(png)); ax.axis("off")
-                ax.set_title(os.path.basename(png))
-                fig.tight_layout()
-            if pngs:
-                plt.show()
-        except Exception:
-            pass
-        self.stitch_status.config(
-            text="blob axis done → " + os.path.basename(run)
-                 + "/Stitched/blob_axis_report.txt", foreground="#0a6")
-
-    def _show_report_window(self, title, report):
-        """Scrollable, copyable text window. Shared by the blob-axis report
-        and anything else that wants to show a plain-text result."""
-        win = tk.Toplevel(self.root)
-        win.title(title)
-        txt = tk.Text(win, width=86, height=30, wrap="none",
-                      font=("TkFixedFont", 10))
-        txt.insert("1.0", report)
-        txt.configure(state="normal")
-        yscroll = ttk.Scrollbar(win, orient="vertical", command=txt.yview)
-        txt.configure(yscrollcommand=yscroll.set)
-        txt.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=10)
-        yscroll.grid(row=0, column=1, sticky="ns", pady=10)
-        win.columnconfigure(0, weight=1); win.rowconfigure(0, weight=1)
-
-        def _copy():
-            self.root.clipboard_clear(); self.root.clipboard_append(report)
-        ttk.Button(win, text="Copy report", command=_copy).grid(
-            row=1, column=0, columnspan=2, pady=(0, 10))
-        return win
 
     def _show_validation_report(self, run, report):
         win = tk.Toplevel(self.root)

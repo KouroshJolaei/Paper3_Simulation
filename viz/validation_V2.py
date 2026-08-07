@@ -29,14 +29,6 @@ PAD_W/PAD_H) so the round-trip can never drift from the real paint step.
 _sample_canvas inverts the NEAREST-TAXEL (Voronoi) splat introduced
 2026-07-29; if stitching's paint rule changes again, this must follow.
 
-ROLLED PADS (2026-08-05): when pose_history shows the pad was rolled
-(GRASP_ROT_DEG), the sampler masks and searches along the pad's own axes by
-calling stitching.rotated_footprint_index — literally the function the splat
-paints with, so there is one rule, not two that must be kept in step. Until
-this change the sampler read an upright 22x37 window off a rotated
-footprint, so SSIM and TC on any rolled run were measuring the mismatch
-between the sampler and the splat, not the fidelity of the stitcher.
-
 GSR: ported from get_gsr.py — model CNN_conv2d_norm3000_full.h5, input
 resized to 9x9, divided by 3000. It is OPTIONAL: if TensorFlow or the model
 file is missing, GSR columns read "n/a" and SSIM+TC still run.
@@ -154,7 +146,7 @@ def ssim(a, b):
 
 
 # ------------------------------------------------ round-trip sampler ----
-def _sample_canvas(canvas, extent, res_mm, oy, oz, tax, basis=None):
+def _sample_canvas(canvas, extent, res_mm, oy, oz, tax):
     """Recover a 7x4 by averaging the canvas over each taxel's footprint.
 
     This is the EXACT inverse of stitching._splat_one: a canvas cell belongs
@@ -162,38 +154,14 @@ def _sample_canvas(canvas, extent, res_mm, oy, oz, tax, basis=None):
     masked to |y| <= PAD_W/2 and |z| <= PAD_H/2. So a no-overlap grasp
     round-trips to itself exactly.
 
-    ROLLED pads (2026-08-05): when `basis` shows the pad was rolled, the mask
-    and the nearest-taxel search run along the pad's OWN axes, via the same
-    stitching.rotated_footprint_index the splat paints with — one definition,
-    so the two can never disagree. Before this the sampler used the upright
-    22x37 window on a rotated footprint, which clipped two real corners,
-    swept in two empty ones, and assigned the rest to the wrong taxels, so
-    every SSIM and TC number on a rolled run was wrong.
-
     (Until 2026-07-29 this used a fixed bw x bh block, matching the old
     fixed-block splat. That splat left a gap column at 0.75 mm/cell and a
     footprint 1.0 mm narrower than the pad; both sides were replaced.)"""
     y0, y1, z0, z1 = extent
     nz, ny = canvas.shape
     out = np.zeros((ST.N_ROWS, ST.N_COLS))
-    cell_y = y0 + np.arange(ny) * res_mm
-    cell_z = z0 + np.arange(nz) * res_mm
-
-    if not ST.is_flat(basis):
-        inside, ri, ci = ST.rotated_footprint_index(
-            cell_y, cell_z, oy, oz, tax, basis)
-        if not inside.any():
-            return out
-        vals = canvas[inside]
-        idx = ri * ST.N_COLS + ci
-        n = np.bincount(idx, minlength=ST.N_ROWS * ST.N_COLS)
-        s = np.bincount(idx, weights=vals, minlength=ST.N_ROWS * ST.N_COLS)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            flat = np.where(n > 0, s / np.maximum(n, 1), 0.0)
-        return flat.reshape(ST.N_ROWS, ST.N_COLS)
-
-    ly = cell_y - oy                               # pad-local mm
-    lz = cell_z - oz
+    ly = (y0 + np.arange(ny) * res_mm) - oy        # pad-local mm
+    lz = (z0 + np.arange(nz) * res_mm) - oz
     sy = np.where(np.abs(ly) <= ST.PAD_W / 2.0)[0]
     sz = np.where(np.abs(lz) <= ST.PAD_H / 2.0)[0]
     if sy.size == 0 or sz.size == 0:
@@ -214,26 +182,15 @@ def _sample_canvas(canvas, extent, res_mm, oy, oz, tax, basis=None):
     return out
 
 
-def _footprint_coverage(count, extent, res_mm, oy, oz, tax, basis=None):
+def _footprint_coverage(count, extent, res_mm, oy, oz):
     """Mean number of grasps painting this grasp's own pad footprint.
     1.0 = nothing else overlaps it (round-trip should be exact); higher
     means the recovered map is an average of that many grasps, so SSIM
-    below 1 is expected and NOT a stitcher fault.
-
-    Uses the ROTATED footprint when the pad was rolled, so this number
-    describes the same cells the sampler above actually read."""
+    below 1 is expected and NOT a stitcher fault."""
     y0, y1, z0, z1 = extent
     nz, ny = count.shape
-    cell_y = y0 + np.arange(ny) * res_mm
-    cell_z = z0 + np.arange(nz) * res_mm
-
-    if not ST.is_flat(basis):
-        inside, _ri, _ci = ST.rotated_footprint_index(
-            cell_y, cell_z, oy, oz, tax, basis)
-        return float(np.mean(count[inside])) if inside.any() else 0.0
-
-    ly = cell_y - oy
-    lz = cell_z - oz
+    ly = (y0 + np.arange(ny) * res_mm) - oy
+    lz = (z0 + np.arange(nz) * res_mm) - oz
     sy = np.where(np.abs(ly) <= ST.PAD_W / 2.0)[0]
     sz = np.where(np.abs(lz) <= ST.PAD_H / 2.0)[0]
     if sy.size == 0 or sz.size == 0:
@@ -259,21 +216,17 @@ def validate_run(run_dir, res_mm=1.0, want_gsr=True):
             continue
         canvas, extent = res["canvas"], res["extent"]
         tax = ST._taxel_centers(ST.CAL[sensor])
-        bases = res.get("bases", {})       # measured pad roll, {} = upright
         rows = []
         for i, (key, (oy, oz), orig) in enumerate(res["grasps"]):
-            basis = bases.get(key)
-            recov = _sample_canvas(canvas, extent, res_mm, oy, oz, tax, basis)
+            recov = _sample_canvas(canvas, extent, res_mm, oy, oz, tax)
             orig_maps[sensor][key] = orig
             recov_maps[sensor][key] = recov
             rows.append({"grasp": key,
                          "is_center": (i == res["center_index"]),
-                         "roll_deg": ST.pad_roll_deg(basis),
                          "ssim": ssim(orig, recov),
                          "tc_err_mm": tc_error_mm(orig, recov),
                          "coverage": _footprint_coverage(
-                             res["count"], extent, res_mm, oy, oz, tax,
-                             basis)})
+                             res["count"], extent, res_mm, oy, oz)})
         ssims = [r["ssim"] for r in rows if r["ssim"] is not None]
         tcs = [r["tc_err_mm"] for r in rows if r["tc_err_mm"] is not None]
         results["sensors"][sensor] = {
@@ -313,19 +266,12 @@ def format_report(results):
             L.append(f"  {sensor}: {blk['error']}")
             continue
         rows, s = blk["rows"], blk["summary"]
-        # The roll column only appears on rolled runs, so reports for the
-        # upright runs already on disk stay byte-for-byte comparable.
-        rolled = any(abs(r.get("roll_deg", 0.0)) > ST.ROLL_DEADBAND_DEG
-                     for r in rows)
-        L.append(f"  {sensor}:  grasp     SSIM    TC_err(mm)   overlap(x)"
-                 + ("   roll(deg)" if rolled else ""))
+        L.append(f"  {sensor}:  grasp     SSIM    TC_err(mm)   overlap(x)")
         for r in rows:
             tag = "*" if r["is_center"] else " "
             tc = r["tc_err_mm"] if r["tc_err_mm"] is not None else -1
             L.append(f"     {tag}{r['grasp']}    {r['ssim']:.3f}     {tc:5.2f}"
-                     f"       {r.get('coverage', 0.0):5.1f}"
-                     + (f"      {r.get('roll_deg', 0.0):+6.2f}"
-                        if rolled else ""))
+                     f"       {r.get('coverage', 0.0):5.1f}")
         L.append(f"     SUMMARY  SSIM={s['ssim_mean']:.3f}   "
                  f"TC_err={s['tc_err_mean_mm']:.2f} mm   "
                  f"(overlap sigma={s['overlap_sigma']:.0f})")

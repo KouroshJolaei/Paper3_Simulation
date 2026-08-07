@@ -55,17 +55,6 @@ T_THRESHOLD = 0.35
 STRICTNESS = 1.25             # effective threshold = 0.4375 of the range
 MIN_CELLS = 5                 # "if len(rows) < 5: return"
 
-# NO-CONTACT FLOOR (added 2026-08-06). The threshold above is RELATIVE to
-# each map's own range, so a map containing nothing but noise still has a
-# max, still has cells above 0.4375 of its range, and still yields a
-# perfectly confident-looking angle. On the 35-point upright grid this made
-# thirteen grasps that never touched the rod report -8 to -12 deg with
-# elongations above 2 — numbers indistinguishable from a real measurement in
-# the table. A map has to clear an ABSOLUTE floor before its axis means
-# anything.
-MIN_PEAK_COUNTS = 20.0        # below this, treat the map as no contact
-MIN_PEAK_FRAC = 0.02          # ...or below this fraction of the run's peak
-
 
 def _upsample(m, r=UPSAMPLE):
     """7x4 -> 70x40, cubic, exactly as network_imagination.High_Res."""
@@ -79,23 +68,14 @@ def _upsample(m, r=UPSAMPLE):
 
 
 def blob_axis(map7x4, upsample=UPSAMPLE, t_threshold=T_THRESHOLD,
-              strictness=STRICTNESS, min_peak=MIN_PEAK_COUNTS):
+              strictness=STRICTNESS):
     """Weighted-PCA orientation of the contact blob.
 
-    Returns a dict, or {"ok": False, "reason": ...} when there is no contact,
-    or the contact is too small or too round for an axis to mean anything.
-
-    min_peak is an ABSOLUTE floor on the map's maximum. Without it a noise-
-    only map still produces an angle, because the working threshold is a
-    fraction of each map's OWN range and noise has a range too. Pass
-    min_peak=0 to get the old unguarded behaviour."""
+    Returns a dict, or {"ok": False, "reason": ...} when the contact is too
+    small or too round for an axis to mean anything."""
     m0 = np.asarray(map7x4, float)
     if m0.shape != (N_ROWS, N_COLS):
         return {"ok": False, "reason": f"expected (7,4), got {m0.shape}"}
-    peak = float(np.nanmax(m0)) if m0.size else 0.0
-    if peak < float(min_peak):
-        return {"ok": False, "peak": peak,
-                "reason": f"no contact (peak {peak:.0f} < {float(min_peak):.0f})"}
     P = _upsample(m0, upsample)
     H, W = P.shape
 
@@ -437,23 +417,12 @@ def measure_run(run_dir, sensor="s1", band_width_mm=BAND_WIDTH_MM):
     except Exception:
         offs = {}
     rows = []
-    # Floor scaled to THIS run: an absolute minimum, raised to a small
-    # fraction of the run's own peak so a low-pressure run is judged on its
-    # own terms rather than against a hard-coded count.
-    peaks = []
-    maps = {}
     for f in files:
         tag = ST._pt_key(os.path.basename(f))
         if tag is None:
             continue
         m, _n, _peak = ST.hold_average(f)
-        maps[tag] = m
-        peaks.append(float(np.nanmax(m)) if m.size else 0.0)
-    run_peak = max(peaks) if peaks else 0.0
-    floor = max(MIN_PEAK_COUNTS, MIN_PEAK_FRAC * run_peak)
-
-    for tag, m in maps.items():
-        info = blob_axis(m, min_peak=floor)
+        info = blob_axis(m)
         basis = bases.get(tag)
         roll = ST.pad_roll_deg(basis)
         exp, expinfo, lang = None, None, None
@@ -464,15 +433,14 @@ def measure_run(run_dir, sensor="s1", band_width_mm=BAND_WIDTH_MM):
                    if expinfo["ok"] else None)
             lang = line_angle_deg(basis, scene)
         rows.append({"grasp": tag, "map": m, "roll_deg": roll,
-                     "pad_yz": offs.get(tag), "peak": float(np.nanmax(m)),
+                     "pad_yz": offs.get(tag),
                      "expected_deg": exp, "line_deg": lang,
                      "expected_info": expinfo,
                      "measured_deg": (info["angle_from_vertical_deg"]
                                       if info["ok"] else None),
                      "info": info})
     return rows, {"tilt_deg": tilt, "tilt_axis": axis, "sensor": sensor,
-                  "scene": scene, "band_width_mm": band_width_mm,
-                  "run_peak": run_peak, "peak_floor": floor}
+                  "scene": scene, "band_width_mm": band_width_mm}
 
 
 def blob_report(run_dir, band_width_mm=BAND_WIDTH_MM):
@@ -493,10 +461,9 @@ def blob_report(run_dir, band_width_mm=BAND_WIDTH_MM):
         any_rows = True
         L.append("")
         L.append(f"  {sensor}:  rod tilt {meta['tilt_deg']:+.1f} deg about "
-                 f"{meta['tilt_axis']};  run peak {meta['run_peak']:.0f}, "
-                 f"no-contact floor {meta['peak_floor']:.0f}")
+                 f"{meta['tilt_axis']}")
         L.append("     grasp    roll    line   expected   measured    error"
-                 "    elong  exp_el  cover    peak")
+                 "    elong  exp_el  cover")
         errs = []
         for r in rows:
             ln = ("     --" if r["line_deg"] is None
@@ -510,22 +477,19 @@ def blob_report(run_dir, band_width_mm=BAND_WIDTH_MM):
                    else f"{100*xe['contact_frac']:5.0f}%")
             if r["measured_deg"] is None:
                 L.append(f"     {r['grasp']}   {r['roll_deg']:+6.2f} {ln} {ex}"
-                         f"        --                            {cov}"
-                         f"  {r['peak']:6.0f}   ({r['info']['reason']})")
+                         f"        --          ({r['info']['reason']})")
                 continue
             if r["expected_deg"] is None:
                 L.append(f"     {r['grasp']}   {r['roll_deg']:+6.2f} {ln} {ex}"
                          f"   {r['measured_deg']:+8.2f}       --"
-                         f"  {r['info']['elongation']:6.2f} {exel} {cov}"
-                         f"  {r['peak']:6.0f}")
+                         f"  {r['info']['elongation']:6.2f} {exel} {cov}")
                 continue
             e = r["measured_deg"] - r["expected_deg"]
             e = (e + 90.0) % 180.0 - 90.0
             errs.append(e)
             L.append(f"     {r['grasp']}   {r['roll_deg']:+6.2f} {ln} {ex}"
                      f"   {r['measured_deg']:+8.2f}  {e:+7.2f}"
-                     f"  {r['info']['elongation']:6.2f} {exel} {cov}"
-                     f"  {r['peak']:6.0f}")
+                     f"  {r['info']['elongation']:6.2f} {exel} {cov}")
         if errs:
             a = np.array(errs)
             L.append(f"     MEAN error {a.mean():+.2f} deg   "
@@ -551,11 +515,6 @@ def blob_report(run_dir, band_width_mm=BAND_WIDTH_MM):
     L.append("           GEOMETRY makes this pose uninformative — that is a")
     L.append("           grid-design problem, not a sensor result.")
     L.append("cover    = fraction of the pad the band covers.")
-    L.append("peak     = largest taxel in the measured map. Below the floor")
-    L.append("           printed above, the map is treated as NO CONTACT and")
-    L.append("           no angle is reported — the working threshold is a")
-    L.append("           fraction of each map's own range, so noise alone")
-    L.append("           would otherwise yield a confident-looking angle.")
     return "\n".join(L)
 
 

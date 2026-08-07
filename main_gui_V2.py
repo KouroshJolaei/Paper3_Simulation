@@ -148,10 +148,6 @@ class CockpitGUI:
             # blank = let the collector decide (stored value, else 26 mm value)
             "calib_close_rad": tk.StringVar(value=""),
             "stitch_want_gsr": tk.BooleanVar(value=False),
-            # Stitch-tab: append the blob-axis metric self-test to the report
-            "blob_selftest": tk.BooleanVar(value=False),
-            # Stitch-tab: fit the contact band width from the run's own maps
-            "blob_fit_width": tk.BooleanVar(value=False),
             # ---- colour-scale policy (2026-08-04) ----
             # Written to Data/plot_scale.json and read by stitching.py,
             # heatmaps.py and temporal_snapshots.py, so every figure in the
@@ -1747,40 +1743,6 @@ class CockpitGUI:
                    command=self.do_validate).grid(
             row=r, column=0, columnspan=3, sticky="ew", pady=(4, 3)); r += 1
 
-        # ---- contact-blob orientation: measured axis vs the grid design ----
-        ttk.Separator(frm, orient="horizontal").grid(
-            row=r, column=0, columnspan=3, sticky="ew", pady=(10, 6)); r += 1
-        ttk.Label(frm, text="BLOB AXIS — contact angle vs design",
-                  font=("", 9, "bold")).grid(row=r, column=0, columnspan=3,
-                                             sticky="w"); r += 1
-        ttk.Label(frm, justify="left", foreground="#555", wraplength=430, text=(
-            "Per grasp, the weighted-PCA principal axis of the contact blob\n"
-            "(Paper 2's own method), against the angle the GEOMETRY implies:\n"
-            "the contact band clipped by the pad window, put through the same\n"
-            "7x4 estimator. Offsets matter — a tilted band pushed off-centre\n"
-            "is only partly visible, and a short piece of a tilted line reads\n"
-            "much straighter than the line itself, so 'expected' is often far\n"
-            "from the rod tilt. Everything comes from this run's own folder.\n"
-            "Per grasp, not on the stitched map — on a 1xN sweep the stitched\n"
-            "blob's shape is set by the stepping direction, not the contact.")
-                  ).grid(row=r, column=0, columnspan=3, sticky="w",
-                         pady=(0, 4)); r += 1
-        ttk.Label(frm, text="contact band width (mm)").grid(row=r, column=0,
-                                                            sticky="e")
-        self.vars["blob_band_mm"] = tk.StringVar(value="8.0")
-        ttk.Entry(frm, textvariable=self.vars["blob_band_mm"], width=8).grid(
-            row=r, column=1, sticky="w", padx=4); r += 1
-        ttk.Checkbutton(frm, text="fit band width from this run's own maps",
-                        variable=self.vars["blob_fit_width"]).grid(
-            row=r, column=0, columnspan=3, sticky="w"); r += 1
-        ttk.Checkbutton(frm, text="also show the metric self-test "
-                                  "(ideal line contact -> what PCA reads)",
-                        variable=self.vars["blob_selftest"]).grid(
-            row=r, column=0, columnspan=3, sticky="w"); r += 1
-        ttk.Button(frm, text="Blob Axis (measured vs expected)",
-                   command=self.do_blob_axis).grid(
-            row=r, column=0, columnspan=3, sticky="ew", pady=(4, 3)); r += 1
-
         self.stitch_status = ttk.Label(frm, text="", foreground="#0a6",
                                        wraplength=430, justify="left")
         self.stitch_status.grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0)); r += 1
@@ -1826,23 +1788,6 @@ class CockpitGUI:
                 if d not in sys.path:
                     sys.path.insert(0, d)
                 spec = importlib.util.spec_from_file_location("validation", cand)
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                return mod
-        return None
-
-    def _load_blob_module(self):
-        """Load viz/blob_axis.py. Like validation.py it imports stitching.py
-        itself, so the viz/ dir has to be on sys.path first."""
-        import importlib.util, sys
-        for cand in (os.path.join(PROJECT, "viz", "blob_axis.py"),
-                     os.path.join(PROJECT, "blob_axis.py"),
-                     os.path.join(PROJECT, "sim", "blob_axis.py")):
-            if os.path.exists(cand):
-                d = os.path.dirname(cand)
-                if d not in sys.path:
-                    sys.path.insert(0, d)
-                spec = importlib.util.spec_from_file_location("blob_axis", cand)
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
                 return mod
@@ -1934,82 +1879,6 @@ class CockpitGUI:
                     "Validate", "Validation failed:\n\n" + tb))
 
         threading.Thread(target=_worker, daemon=True).start()
-
-    def do_blob_axis(self):
-        """Per-grasp contact-blob orientation vs the angle the grid design
-        implies. Threaded because it re-reads every grasp's CSV."""
-        import traceback
-        run = self._stitch_target_dir()
-        selftest = bool(self.vars["blob_selftest"].get())
-        fit_w = bool(self.vars["blob_fit_width"].get())
-        try:
-            band = float(self.vars["blob_band_mm"].get())
-        except Exception:
-            band = 8.0
-        self.stitch_status.config(text="measuring blob axis…",
-                                  foreground="#06a")
-
-        def _worker():
-            try:
-                mod = self._load_blob_module()
-                if mod is None:
-                    self.root.after(0, lambda: messagebox.showerror(
-                        "Blob Axis",
-                        "blob_axis.py not found (expected in viz/)."))
-                    return
-                report, pngs = mod.blob_and_save(
-                    run, band_width_mm=band, fit_width=fit_w)
-                if selftest:
-                    report = report + "\n\n" + mod.metric_selftest()
-                self.root.after(0, lambda: self._show_blob_report(
-                    run, report, pngs))
-            except Exception:
-                tb = traceback.format_exc()
-                self.root.after(0, lambda: messagebox.showerror(
-                    "Blob Axis", "Blob axis failed:\n\n" + tb))
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _show_blob_report(self, run, report, pngs):
-        self._show_report_window("Blob axis — " + os.path.basename(run),
-                                 report)
-        try:
-            import matplotlib.pyplot as plt
-            import matplotlib.image as mpimg
-            for png in pngs:
-                fig = plt.figure(figsize=(12.5, 4.4))
-                ax = fig.add_subplot(1, 1, 1)
-                ax.imshow(mpimg.imread(png)); ax.axis("off")
-                ax.set_title(os.path.basename(png))
-                fig.tight_layout()
-            if pngs:
-                plt.show()
-        except Exception:
-            pass
-        self.stitch_status.config(
-            text="blob axis done → " + os.path.basename(run)
-                 + "/Stitched/blob_axis_report.txt", foreground="#0a6")
-
-    def _show_report_window(self, title, report):
-        """Scrollable, copyable text window. Shared by the blob-axis report
-        and anything else that wants to show a plain-text result."""
-        win = tk.Toplevel(self.root)
-        win.title(title)
-        txt = tk.Text(win, width=86, height=30, wrap="none",
-                      font=("TkFixedFont", 10))
-        txt.insert("1.0", report)
-        txt.configure(state="normal")
-        yscroll = ttk.Scrollbar(win, orient="vertical", command=txt.yview)
-        txt.configure(yscrollcommand=yscroll.set)
-        txt.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=10)
-        yscroll.grid(row=0, column=1, sticky="ns", pady=10)
-        win.columnconfigure(0, weight=1); win.rowconfigure(0, weight=1)
-
-        def _copy():
-            self.root.clipboard_clear(); self.root.clipboard_append(report)
-        ttk.Button(win, text="Copy report", command=_copy).grid(
-            row=1, column=0, columnspan=2, pady=(0, 10))
-        return win
 
     def _show_validation_report(self, run, report):
         win = tk.Toplevel(self.root)
