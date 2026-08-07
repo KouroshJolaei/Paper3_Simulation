@@ -201,10 +201,6 @@ MANUAL_LIMITS = {
 REACH_ONLY  = os.environ.get("GRASP_REACH_ONLY", "0") == "1"  # check + exit, no motion
 REACH_CHECK = os.environ.get("GRASP_REACH_CHECK", "1") == "1" # auto-check before a run
 REACH_SKIP  = os.environ.get("GRASP_REACH_SKIP", "1") == "1"  # skip unreachable points
-# Jacobian conditioning + dry-run convergence are ADVISORY by default: they
-# describe a straight-line path the executor never drives. See
-# evaluate_reachability. Set 1 for the old veto behaviour.
-REACH_STRICT = os.environ.get("GRASP_REACH_STRICT", "0") == "1"
 
 # where to write data — fresh timestamped folder per run (no old data mixing in)
 import datetime as _dt
@@ -305,51 +301,9 @@ from curobo.wrap.reacher.motion_gen import (
 EXAMPLES_DIR      = "/home/kourosh/Paper3_Simulation/TSF-85/examples"
 SCENES_DIR        = os.path.join(EXAMPLES_DIR, "scenes")
 USD_PATH          = os.path.join(SCENES_DIR, "scene_cylinder.usd")
-# ROBOT DESCRIPTION for cuRobo.
-#
-# ur5e.yml (Berith's) has tool0's only sphere at radius -0.01, i.e. DISABLED,
-# so nothing past the flange is collision-checked: the gripper, fingers and
-# pads are invisible to the planner. That is a real safety gap — at 90 deg pad
-# roll the flange passes 157 mm clear of the rod while the gripper sweeps
-# straight through it.
-#
-# ur5e_gripper.yml is a copy of his file with only that block replaced, using
-# geometry measured in-scene (probe_tool_extents). It is CORRECT about where
-# the tool is — 230 mm past the flange, confirmed — but currently too
-# CONSERVATIVE: the spheres are rotationally symmetric, so the fingers' 74.8 mm
-# span in one direction is applied all the way round, and a 76 mm envelope
-# rejects poses that have always worked.
-#
-# So it is OPT-IN, and OFF by default. Everything collected so far used the
-# stock file and keeps working untouched; the tool model can be switched on for
-# experiments without disturbing any of it.
-#
-#   GRASP_TOOL_COLLISION=1   use ur5e_gripper.yml (gripper IS collision-checked)
-#   GRASP_TOOL_COLLISION=0   use ur5e.yml (default; arm only — NOT lab-safe)
-#   GRASP_ROBOT_YAML=<path>  explicit override, wins over both
-TOOL_COLLISION = os.environ.get("GRASP_TOOL_COLLISION", "0") == "1"
-_YAML_STOCK = os.path.join(SCENES_DIR, "ur5e.yml")
-_YAML_WITH_TOOL = os.path.join(SCENES_DIR, "ur5e_gripper.yml")
-CUROBO_ROBOT_YAML = os.environ.get("GRASP_ROBOT_YAML", "")
-if not CUROBO_ROBOT_YAML:
-    if TOOL_COLLISION and os.path.exists(_YAML_WITH_TOOL):
-        CUROBO_ROBOT_YAML = _YAML_WITH_TOOL
-    else:
-        if TOOL_COLLISION:
-            print(f"[grid] GRASP_TOOL_COLLISION=1 but {_YAML_WITH_TOOL} is "
-                  f"missing — falling back to the stock description.")
-        CUROBO_ROBOT_YAML = _YAML_STOCK
-print(f"[grid] robot description: {os.path.basename(CUROBO_ROBOT_YAML)}  "
-      f"(GRASP_TOOL_COLLISION={int(TOOL_COLLISION)} -> gripper "
-      f"{'IS' if TOOL_COLLISION else 'is NOT'} collision-checked)")
+CUROBO_ROBOT_YAML = os.path.join(SCENES_DIR, "ur5e.yml")
 ROBOT_PRIM_PATH   = "/World/robot_gripper_adapter_sensor"
 SENSOR_ROOT_RIGHT = f"{ROBOT_PRIM_PATH}/TSF_85_right/TSF_85"
-# gripper subtree, used by the tool-extent probe (same path grasp_one_point
-# uses for its per-grasp probe)
-_GRIP_ROOT_GLOBAL = (f"{ROBOT_PRIM_PATH}/robot_gripper_adapter_sensor"
-                     f"/Robotiq_2F_85_adapter_fixed_v_sibling__1_"
-                     f"/Robotiq_2F_85_modified/Robotiq_2F_85")
-_FLANGE_PRIM = f"{ROBOT_PRIM_PATH}/robot_gripper_adapter_sensor/ur5e/wrist_3_link"
 SENSOR_ROOT_LEFT  = f"{ROBOT_PRIM_PATH}/TSF_85_left/TSF_85"
 TSF_EXT_SEARCH    = "/home/kourosh/Paper3_Simulation/TSF-85"
 
@@ -760,81 +714,11 @@ from curobo.geom.types import WorldConfig, Cuboid
 #   True  = table collision slab active (the Step-1 change under test).
 # Set False first and run the centered 1x1: if it no longer explodes, the
 # collision world was the trigger. Then flip True to reconfirm.
-USE_COLLISION_WORLD = os.environ.get("GRASP_COLLISION_WORLD", "1") == "1"
+USE_COLLISION_WORLD = True
 
 TABLE_TOP_Z_M   = 0.985            # slab top (below base 0.99275, below fingertips)
 TABLE_CENTER_XY = (0.0009, 0.0)    # table footprint centre  (world, m)
 TABLE_DIMS_XY   = (0.732, 0.867)   # table footprint extents (world, m)
-
-# ---- THE TARGET OBJECT AS A PHASE-DEPENDENT OBSTACLE (2026-08-06) --------
-# The rod was deliberately left OUT of the collision world, and for a good
-# reason: it is the thing the pads are driven INTO. As a plain obstacle the
-# planner refuses to bring the gripper anywhere near it and every point turns
-# unreachable.
-#
-# But leaving it out means the free move — which at 90 deg roll swings the
-# flange 157 mm sideways across the workspace — is planned as though the rod
-# were not there. That is exactly the sweep most likely to hit it, and on a
-# real robot it would.
-#
-# So the obstacle is PHASE-DEPENDENT:
-#   free move to the stand-off   -> object ENABLED  (do not sweep through it)
-#   stitched descent, pad-to-pad -> object DISABLED (contact is the point)
-# The table slab stays enabled throughout; nothing is ever meant to touch it.
-#
-#   GRASP_OBJECT_COLLISION=0  leaves the object out entirely (old behaviour)
-OBJECT_OBSTACLE_NAME = "target_object"
-OBJECT_COLLISION = os.environ.get("GRASP_OBJECT_COLLISION", "1") == "1"
-# Grown slightly so a plan does not graze the surface. Contact phases have the
-# obstacle switched off, so this margin never fights the grasp itself.
-OBJECT_INFLATE_M = float(os.environ.get("GRASP_OBJECT_INFLATE_M", "0.005"))
-# How close to the goal the object stops being an obstacle. Everything
-# outside this is a normal collision-checked move; inside it, touching the
-# object is the point. Must exceed OBJECT_INFLATE_M or the inflated shell
-# blocks the final approach.
-CONTACT_ZONE_M = float(os.environ.get("GRASP_CONTACT_ZONE_M", "0.030"))
-# How far a stitched descent may fall behind its commanded travel before it is
-# declared blocked, and how far the pad may end up from the grasp pose before
-# the fingers are refused. Both exist because a blocked descent used to be
-# silent: it just closed on whatever it was jammed against.
-STEP_SHORTFALL_ABORT_MM = float(os.environ.get("GRASP_STEP_SHORTFALL_MM", "8.0"))
-MAX_DESCENT_RESIDUAL_MM = float(os.environ.get("GRASP_MAX_RESIDUAL_MM", "3.0"))
-
-
-def _object_obstacle():
-    """The target object as an ORIENTED bounding cuboid, or None.
-
-    A cuboid is used rather than a cylinder primitive so this does not depend
-    on which geometry types this cuRobo build exposes. For a cylinder it is
-    conservative only in the four corners of the cross-section, which costs
-    nothing here because the obstacle is off during every contact phase.
-
-    Sized from the run's own config, so replacing the rod with another shape
-    needs no code change — only the dims below become more conservative."""
-    d = OBJ_DIAM_MM / 1000.0
-    L = float(CONFIG["object"].get("length_mm", 140.0)) / 1000.0
-    if d <= 0.0 or L <= 0.0:
-        print("[grid] object obstacle SKIPPED (no diameter/length in config)")
-        return None
-    g = 2.0 * OBJECT_INFLATE_M
-    dims = [float(d + g), float(d + g), float(L + g)]
-    # tilt about world X, matching how the scene and every plot place the rod
-    th = np.deg2rad(OBJ_TILT_DEG) if str(OBJ_TILT_AXIS).upper() == "X" else 0.0
-    qw, qx = float(np.cos(th / 2.0)), float(np.sin(th / 2.0))
-    c_base = world_to_base(np.array(OBJ_CENTER, float))
-    # the obstacle pose is in the BASE frame; combine the rod tilt with the
-    # world->base rotation the same way world_to_base handles positions
-    q_wb = np.asarray(ROBOT_WORLD_QUAT_WXYZ, float)
-    q_wb_inv = np.array([q_wb[0], -q_wb[1], -q_wb[2], -q_wb[3]])   # unit -> conj
-    q_obj = quat_mul(q_wb_inv, np.array([qw, qx, 0.0, 0.0]))
-    pose = [float(c_base[0]), float(c_base[1]), float(c_base[2]),
-            float(q_obj[0]), float(q_obj[1]), float(q_obj[2]), float(q_obj[3])]
-    print(f"[grid] object obstacle '{OBJECT_OBSTACLE_NAME}': base-frame centre="
-          f"{[round(v,4) for v in c_base]} dims={[round(v,4) for v in dims]} "
-          f"tilt={OBJ_TILT_DEG:+.1f} deg about {OBJ_TILT_AXIS} "
-          f"(inflated {1000*OBJECT_INFLATE_M:.1f} mm)")
-    return Cuboid(name=OBJECT_OBSTACLE_NAME, pose=pose, dims=dims)
-
 
 def _build_collision_world():
     top, bottom = TABLE_TOP_Z_M, 0.0
@@ -847,41 +731,7 @@ def _build_collision_world():
             1.0, 0.0, 0.0, 0.0]                          # identity orientation
     print(f"[grid] collision world: table slab base-frame center="
           f"{[round(v,4) for v in base_center]} dims={[round(v,4) for v in dims]}")
-    cubes = [Cuboid(name="table_surface", pose=pose, dims=dims)]
-    if OBJECT_COLLISION:
-        _o = _object_obstacle()
-        if _o is not None:
-            cubes.append(_o)
-    return WorldConfig(cuboid=cubes)
-
-
-# ---- phase toggle --------------------------------------------------------
-_obj_coll_state = [None]        # None = unknown, True/False = last set
-
-
-def set_object_collision(enable, why=""):
-    """Enable/disable the target object as an obstacle, mid-run.
-
-    Free moves plan AROUND the object; contact phases plan THROUGH where it
-    is. Wrapped and idempotent: if this cuRobo build has no
-    enable_obstacle(), it says so once and everything continues with the
-    object permanently in the world."""
-    if not (USE_COLLISION_WORLD and OBJECT_COLLISION):
-        return
-    if _obj_coll_state[0] is enable:
-        return
-    try:
-        mg.world_coll_checker.enable_obstacle(OBJECT_OBSTACLE_NAME, bool(enable))
-        _obj_coll_state[0] = bool(enable)
-        print(f"  [world] object obstacle {'ON ' if enable else 'OFF'}"
-              f"{(' (' + why + ')') if why else ''}")
-    except Exception as e:
-        if _obj_coll_state[0] is None:
-            print(f"[world] enable_obstacle unavailable ({type(e).__name__}: "
-                  f"{e}) — object stays in the world for ALL phases, which "
-                  f"will make contact poses unreachable; set "
-                  f"GRASP_OBJECT_COLLISION=0 to remove it")
-        _obj_coll_state[0] = "unavailable"
+    return WorldConfig(cuboid=[Cuboid(name="table_surface", pose=pose, dims=dims)])
 
 # ============================================================
 # cuRobo
@@ -897,66 +747,6 @@ mg = MotionGen(MotionGenConfig.load_from_robot_config(
     num_trajopt_seeds=4, project_pose_to_goal_frame=True, use_cuda_graph=False))
 mg.warmup(enable_graph=False, warmup_js_trajopt=False)
 print("[grid] cuRobo ready.")
-
-
-# ---- WHAT DOES cuRobo ACTUALLY COLLISION-CHECK?  (2026-08-07) ------------
-# The 90 deg pad y=+80 run planned straight through the rod and then ground
-# into it: the planner saw no collision, PhysX resisted, and the descent ended
-# 47 mm short. The obstacle was in the world and correctly placed. The thing
-# that was missing was on the ROBOT side.
-#
-# CUROBO_ROBOT_YAML is ur5e.yml — a stock UR5e, which ends at the wrist
-# flange. The Robotiq gripper, the fingers and the TSF-85 pads are not in it,
-# so cuRobo cannot collide them with anything. At 90 deg roll the flange
-# passes 157 mm clear of the rod, so the plan looks perfectly safe while the
-# gripper sweeps straight through.
-#
-# This prints the gap so it is a measured fact, not a suspicion: how far the
-# sphere model reaches from the flange, versus how far the pad actually is.
-def report_collision_model():
-    try:
-        q0 = ta.to_device(np.zeros((1, len(ARM_JOINT_NAMES)), np.float32))
-        spheres = mg.kinematics.get_robot_as_spheres(q0)
-        flat = spheres[0] if (spheres and isinstance(spheres[0], list)) else spheres
-        n = len(flat)
-        # How far FORWARD along the approach axis does any sphere reach? The
-        # first version measured plain distance from the EE, which counts the
-        # shoulder and produced a nonsense 956 mm. Project onto the tool axis
-        # instead — that is the question that matters.
-        ee_p, ee_q = fk(np.zeros(len(ARM_JOINT_NAMES), np.float32))
-        # the EE's OWN +z at this configuration — NOT the commanded pose's
-        # axis, which is a different orientation entirely
-        _ax = rotmat(np.asarray(ee_q, float)) @ np.array([0.0, 0.0, 1.0])
-        reach = 0.0
-        for sp in flat:
-            c = np.asarray(getattr(sp, "position", [0, 0, 0]), float)
-            r = float(getattr(sp, "radius", 0.0))
-            if r <= 0.0:                              # negative radius = disabled
-                continue
-            reach = max(reach, float((c - ee_p) @ _ax) + r)
-        print(f"[grid] collision model: {n} spheres, reaching "
-              f"{1000*reach:.0f} mm PAST the flange along the tool axis; the "
-              f"pad sits {1000*TOOL_OFFSET_Z:.0f} mm past it.")
-        if reach < TOOL_OFFSET_Z * 0.6:
-            print("[grid] !! THE GRIPPER IS NOT IN THE COLLISION MODEL. cuRobo "
-                  "can only collide the arm, so a plan that sweeps the FINGERS "
-                  "or the PADS through the object will still look safe. "
-                  "Collision results are valid for the arm only.")
-            print("[grid] !! To fix properly, add gripper+pad spheres to "
-                  f"{os.path.basename(CUROBO_ROBOT_YAML)}.")
-        return {"n_spheres": n, "reach_beyond_flange_mm": 1000 * reach,
-                "pad_offset_mm": 1000 * TOOL_OFFSET_Z,
-                "gripper_modelled": bool(reach >= TOOL_OFFSET_Z * 0.6)}
-    except Exception as e:
-        print(f"[grid] collision model: could not inspect "
-              f"({type(e).__name__}: {e})")
-        return {"error": f"{type(e).__name__}: {e}"}
-
-
-# NOTE: this used to be called HERE and crashed every run with
-# "NameError: name 'fk' is not defined" — fk() is defined further down. It is
-# now called after fk exists (search COLLISION_MODEL_INFO below).
-COLLISION_MODEL_INFO = None
 
 # ---- Tool orientation, with OPTIONAL finger rotation ----
 # Base tool-down orientation (same as your working grasp):
@@ -1056,6 +846,7 @@ APPROACH_AXIS_WORLD = rotmat(ROBOT_WORLD_QUAT_WXYZ) @ APPROACH_AXIS_BASE
 # A/B'd in one run.
 #   GRASP_APPROACH_ALONG_TOOL=0  (default) world Z, exactly as before
 #   GRASP_APPROACH_ALONG_TOOL=1            along the tool approach axis
+# APPROACH_ALONG_TOOL = os.environ.get("GRASP_APPROACH_ALONG_TOOL", "0") == "1"
 APPROACH_ALONG_TOOL = os.environ.get("GRASP_APPROACH_ALONG_TOOL", "1") == "1"
 
 # GRAPH SEARCH for the free move (see plan_free_move). ON by default: without
@@ -1136,12 +927,6 @@ def fk(q):
 #   pad pose from joints -> cuRobo FK -> EE world -> fixed wrist->pad offset
 #   (the Paper-2 logic; offset probed in THIS scene by probe_pad_normal.py).
 PAD_OFF_WRIST = np.array([-0.0142, 0.0624, 0.1214])   # m, wrist_3-local (probed)
-
-
-# deferred from the cuRobo setup block above: report_collision_model() needs
-# fk(), which only exists from here down.
-if USE_COLLISION_WORLD:
-    COLLISION_MODEL_INFO = report_collision_model()
 
 def pad_pose_from_joints(q_arm):
     """(pos[3], R[3x3]) of the pad frame in WORLD, from the arm joints.
@@ -1234,7 +1019,6 @@ def plan_free_move(start_q, target_base, label):
     it fails, so this cannot do worse than the previous behaviour.
       GRASP_ENABLE_GRAPH=0  restores the old local-only planning
     """
-    set_object_collision(True, "free move")
     s = JointState.from_position(
             ta.to_device(start_q.astype(np.float32)).view(1, -1),
             joint_names=ARM_JOINT_NAMES)
@@ -1268,31 +1052,15 @@ def plan_stitched_z(start_q, dz, label):
             np.array(CASE13_WEIGHT, dtype=np.float32)))
     cfg = MotionGenPlanConfig(enable_graph=False, max_attempts=4,
                               enable_finetune_trajopt=False, pose_cost_metric=metric)
-    # CONTACT ZONE (2026-08-07). Disabling the object for the WHOLE descent
-    # was wrong. At 90 deg roll the approach axis is horizontal, so this
-    # "descent" is a 100 mm sweep along world Y — and on the pad y=+80 run it
-    # went from Y=22 straight through the rod at Y=186..212 with collision
-    # switched off. The gripper shoved the cylinder across the table.
-    #
-    # Contact only legitimately happens in the last few mm. So the object
-    # stays an obstacle for the long approach and is released only inside
-    # CONTACT_ZONE_M of the goal.
-    #
-    # Travel direction: upright (or flag off) this is (0,0,-1) and
+    step = dz / N_STEPS
+    # Travel direction. Upright (or flag off) this is (0,0,-1) and
     # `cpos + (-step)*axis` is identical to the old `cpos[2] += step`, so
     # nothing changes for existing runs. Rolled with the flag on, it follows
     # the tool's approach axis — the one CASE13_WEIGHT actually frees.
-    step = dz / N_STEPS
     _axis = approach_axis_base()
-    _travel = abs(float(dz))
-    _short = 0.0               # accumulated shortfall along the travel axis
     cur_q = start_q.copy()
     stitched = []
     for i in range(N_STEPS):
-        # distance still to go AFTER this step
-        _left = _travel * (1.0 - float(i + 1) / N_STEPS)
-        set_object_collision(_left > CONTACT_ZONE_M,
-                             f"descent, {1000*_left:.0f} mm to go")
         cpos, cquat = fk(cur_q)
         tgt = cpos + (-step) * _axis
         s = JointState.from_position(
@@ -1311,31 +1079,6 @@ def plan_stitched_z(start_q, dz, label):
             print(f"  [{label}] step {i+1}/{N_STEPS} FAILED ({r.status})")
             return None
         tr = r.get_interpolated_plan().position.cpu().numpy()
-
-        # ---- DID THE STEP ACTUALLY ARRIVE?  (2026-08-07) -----------------
-        # CASE13_WEIGHT = [1,1,1,1,1,0] FREES the tool's own z, which is the
-        # very axis this loop travels along. So a step can report success
-        # while barely moving: the constraint it satisfied never mentioned
-        # the travel direction. Blocked by an obstacle, every step lands a
-        # little short, nothing complains, and the shortfall accumulates —
-        # 47 mm over ten steps on the pad y=+80, 90 deg run, after which the
-        # gripper closed anyway.
-        #
-        # So measure it: how far along the axis did we really go?
-        # The commanded displacement is (-step)*_axis, so project the ACHIEVED
-        # displacement onto _axis and compare magnitudes. Works for descent
-        # (step<0) and retreat (step>0) alike.
-        _p_end, _ = fk(np.asarray(tr[-1], np.float32))
-        _moved = float((_p_end - cpos) @ _axis)
-        _asked = -float(step)
-        _short += max(0.0, abs(_asked) - abs(_moved))
-        if _short > STEP_SHORTFALL_ABORT_MM / 1000.0:
-            print(f"  [{label}] step {i+1}/{N_STEPS} arrived "
-                  f"{1000*_short:.1f} mm short in total (limit "
-                  f"{STEP_SHORTFALL_ABORT_MM:.0f} mm) — the path is BLOCKED. "
-                  f"Stopping instead of grinding into it.")
-            return None
-
         if stitched: tr = tr[1:]
         stitched.extend(list(tr))
         cur_q = tr[-1].copy()
@@ -1349,7 +1092,6 @@ def plan_stitched_line(start_q, delta_world, label, n_steps=LINE_STEPS):
     Each step is tiny (e.g. 8 mm / 10 = 0.8 mm), so cuRobo cannot swing to a
     different arm branch -> no jerk. Returns None if any step fails (caller
     then falls back to the old approach)."""
-    set_object_collision(False, "pad-to-pad move near the object")
     delta = np.asarray(delta_world, dtype=float)
     if float(np.linalg.norm(delta)) < 1e-6:
         return np.array([start_q.copy()])
@@ -1451,29 +1193,7 @@ def evaluate_reachability(q_start, q_goal, manual_limits=None,
                           cond_max_warn=COND_MAX_WARN,
                           pos_tol=POS_TOL_M, rot_tol_deg=ROT_TOL_DEG,
                           check_cond=True):
-    """Dry-run q_start -> q_goal. Nothing is commanded. Paper-2 logic.
-
-    ADVISORY vs VETO (2026-08-07). This walks a STRAIGHT LINE in joint space
-    and checks the Jacobian along it. The executor never performs that motion:
-    it free-moves to the stand-off (cuRobo, free to curve) and then descends in
-    0.8 mm steps. So a conditioning failure here says the straight line is
-    poorly conditioned, NOT that the pose cannot be reached.
-
-    It was silently costing real data. The same 90 deg pose, same offsets,
-    reported min_sigma 0.0060 -> 0.0040 -> 0.0012 on three runs and flipped
-    from reachable to 'cond(J)=1749 > 1000' on the third, while cuRobo planned
-    to it and the IK solver hit it to 0.002 mm every time. A gate that
-    marginal, on a path nobody drives, should not be able to skip a point.
-
-    So the SOFT checks — conditioning and non-convergence of the dry run — are
-    now recorded as warnings and leave `reachable` True. The HARD checks stay
-    fatal, because they describe the goal itself rather than the straight-line
-    path to it: frozen joints, one_sided, delta_bounds, per_iter_dq_cap and
-    absolute joint limits. And a missing IK/plan solution still fails outright,
-    upstream of this function.
-
-      GRASP_REACH_STRICT=1  restores the old behaviour (soft checks fatal)
-    """
+    """Dry-run q_start -> q_goal. Nothing is commanded. Paper-2 logic."""
     ml = manual_limits or {}
     frozen_joints   = list(ml.get("frozen_joints", []) or [])
     one_sided       = ml.get("one_sided", {}) or {}
@@ -1504,7 +1224,6 @@ def evaluate_reachability(q_start, q_goal, manual_limits=None,
     q_prev = traj[0].copy()
     traj_q = [q_prev.copy()]
     smin_hist = []
-    warnings = []              # soft findings: recorded, not fatal
     reachable, reason = True, "converged"
 
     for k in range(1, len(traj)):
@@ -1551,13 +1270,9 @@ def evaluate_reachability(q_start, q_goal, manual_limits=None,
                 cnd  = float(np.max(s) / smin)
                 smin_hist.append(smin)
                 if cnd > cond_max_warn:
-                    # SOFT: the straight line is badly conditioned here. The
-                    # executor does not drive this line, so record it and
-                    # carry on. Fatal only under GRASP_REACH_STRICT=1.
-                    _w = f"cond(J)={cnd:.1f} > {cond_max_warn}"
-                    warnings.append(_w); limit_hits.append(_w)
-                    if REACH_STRICT:
-                        reachable = False; reason = _w; break
+                    reachable = False
+                    reason = f"cond(J)={cnd:.1f} > {cond_max_warn}"
+                    limit_hits.append(reason); break
             except Exception as _je:
                 pass                                 # no J -> skip the gate
 
@@ -1571,24 +1286,14 @@ def evaluate_reachability(q_start, q_goal, manual_limits=None,
 
     if reachable:
         if np.linalg.norm(dp_final) < pos_tol and ang_final < rot_tol:
-            reason = ("converged (trajectory dry-run)" if not warnings else
-                      "converged with warnings (trajectory dry-run)")
+            reason = "converged (trajectory dry-run)"
         else:
-            # SOFT: the straight-line dry run did not land on the goal. That
-            # is a property of this integrator, not of the pose — cuRobo has
-            # already planned to it. Advisory unless GRASP_REACH_STRICT=1.
-            _w = "final FK error above tolerance (trajectory dry-run)"
-            warnings.append(_w); limit_hits.append(_w)
-            if REACH_STRICT:
-                reachable = False; reason = _w
-            else:
-                reason = "dry-run did not converge, but the planner reached it"
+            reachable = False
+            reason = "final FK error above tolerance (trajectory dry-run)"
 
     return {
         "reachable": bool(reachable),
         "reason": reason,
-        "advisory": warnings,
-        "reach_strict": bool(REACH_STRICT),
         "limit_hits": limit_hits,
         "iters": len(traj_q) - 1,
         "n_steps": N,
@@ -1597,37 +1302,30 @@ def evaluate_reachability(q_start, q_goal, manual_limits=None,
         "min_sigma": float(min(smin_hist)) if smin_hist else None,
     }
 
-def _ik_at(target_world, q_seed, label="ik", prev_world=None):
-    """Joint solution at an EE world target, by the route the RUN will take.
+def _ik_at(target_world, q_seed, label="ik"):
+    """Joint solution at an EE world target, tool pointing down.
 
-    Returns (q_goal | None, path_used) where path_used is "up_then_down",
-    "pad_to_pad" or "failed".
+    Returns (q_goal | None, path_used) where path_used is "direct",
+    "up_then_down" or "failed".
 
-    WHY THERE IS NO "direct" ANY MORE (2026-08-07). This used to try a single
-    straight plan into the grasp pose first, because one plan is faster than
-    two. But the executor NEVER does that: the first point free-moves to
-    grasp + APPROACH_H and then descends, and every later point goes
-    pad-to-pad along a stitched line. So "reachable" was being proved on a
-    path the run does not drive — which is how a point gets certified and then
-    fails in execution. Every report up to 2026-08-07 carried the warning
-    `certified via the DIRECT plan only`; this removes the cause.
+    WHY TWO TRIES: the first version planned STRAIGHT from home into the grasp
+    pose. The real run never does that — it free-moves to grasp+APPROACH_H and
+    THEN does the stitched descent. Planning straight in can fail where
+    up-then-down succeeds, which is exactly how pt00 got a FALSE 'unreachable'
+    and was skipped. So: try direct (fast), and if it fails, mirror what the run
+    actually does before declaring the point unreachable.
 
-    prev_world is the previous point's EE target. Given, and with
-    POINT_TO_POINT on, the pad-to-pad line is checked — exactly the call the
-    executor makes. Otherwise up-then-down, exactly what it does for the first
-    point. The line falls back to up-then-down because the executor falls back
-    the same way."""
+    WHICH PATH SUCCEEDED IS NOW RECORDED (2026-08-06). The executor with
+    direct=False ALWAYS goes up-then-down, so a point certified only by the
+    "direct" branch was certified on a path the run never takes — a known way
+    for the pre-check and the executor to disagree. The ledger counts these."""
     tw = np.asarray(target_world, float)
-    q_seed = np.asarray(q_seed, float)
-
-    if prev_world is not None and POINT_TO_POINT:
-        delta = tw - np.asarray(prev_world, float)
-        tr = plan_stitched_line(q_seed, delta, f"{label}:pad-to-pad")
-        if tr is not None:
-            return np.asarray(tr[-1], float), "pad_to_pad"
-
+    tr = plan_free_move(np.asarray(q_seed, float), world_to_base(tw), f"{label}:direct")
+    if tr is not None:
+        return np.asarray(tr[-1], float), "direct"
     up_world = up_point(tw)
-    tr_up = plan_free_move(q_seed, world_to_base(up_world), f"{label}:to-up")
+    tr_up = plan_free_move(np.asarray(q_seed, float), world_to_base(up_world),
+                           f"{label}:to-up")
     if tr_up is None:
         return None, "failed"
     q_up = np.asarray(tr_up[-1], float)
@@ -1658,16 +1356,14 @@ def _ik_at(target_world, q_seed, label="ik", prev_world=None):
 # is no world to collide with, so nothing here can distinguish "out of reach"
 # from "would hit the table". That separation arrives in Step 3, by planning
 # twice — once with the world and once without.
-REACH_CODES = ("ok", "ok_advisory", "ik_no_solution", "path_infeasible",
-               "singularity", "joint_limit", "manual_limit", "collision_static")
+REACH_CODES = ("ok", "ik_no_solution", "path_infeasible", "singularity",
+               "joint_limit", "manual_limit", "collision_static")
 
 
 def _reach_reason_code(res, path_used):
     """Map an evaluate_reachability result onto a stable code."""
     if res.get("reachable"):
-        # reachable, but the straight-line dry run objected to something the
-        # executor never drives — worth seeing, not worth skipping the point
-        return "ok_advisory" if res.get("advisory") else "ok"
+        return "ok"
     hits = [str(h) for h in (res.get("limit_hits") or [])]
     blob = " ".join(hits + [str(res.get("reason", ""))]).lower()
     if path_used == "failed" or "ik_failed" in blob or "ik/plan failed" in blob:
@@ -1753,9 +1449,6 @@ def write_execution_ledger(out_dir):
     doc = {"generated": _stamp, "config": _args.config,
            "grasp_rot_deg": float(ROT_DEG),
            "use_collision_world": bool(USE_COLLISION_WORLD),
-           "collision_model": COLLISION_MODEL_INFO,
-           "robot_yaml": os.path.basename(CUROBO_ROBOT_YAML),
-           "tool_collision": bool(TOOL_COLLISION),
            "reach_skip": bool(REACH_SKIP),
            "counts": counts, "points": rows}
     try:
@@ -1871,28 +1564,9 @@ def ik_probe(ee_world, tag):
         "upright":  _ik_try(world_to_base(ee_world), tq_base, f"{tag} upright-orient"),
         "pad_only": _ik_try(world_to_base(ee_upright), tq_base, f"{tag} unrolled-flange"),
     }
-    # 4th probe: the SAME rolled pose with the target object removed. If it
-    # solves only then, the object is what blocked it — the one thing that
-    # separates "out of reach" from "would hit the rod". Only meaningful once
-    # the object is actually in the world.
-    no_obj = None
-    if USE_COLLISION_WORLD and OBJECT_COLLISION and not out["rolled"].get("success"):
-        try:
-            set_object_collision(False, "IK probe: is the OBJECT the blocker?")
-            no_obj = _ik_try(world_to_base(ee_world), tq, f"{tag} rolled, no object")
-        finally:
-            set_object_collision(True, "IK probe done")
-        out["rolled_no_object"] = no_obj
-
     # one-line verdict, so the JSON does not have to be read to know what to do
     r, u, p = (out["rolled"].get("success"), out["upright"].get("success"),
                out["pad_only"].get("success"))
-    if no_obj is not None and no_obj.get("success") and not r:
-        out["verdict"] = ("BLOCKED BY THE OBJECT — the same pose solves with "
-                          "the target object removed, so this is a collision, "
-                          "not a reach limit")
-        print(f"  [ikprobe] {tag} VERDICT: {out['verdict']}")
-        return out
     if r:
         v = ("POSE IS REACHABLE — IK solves it, so the PLANNER/seed failed, "
              "not the geometry")
@@ -1914,8 +1588,6 @@ def ik_probe(ee_world, tag):
 def precheck_reachability(grid_points, q_home):
     """Dry-run EVERY grid point BEFORE any motion. Writes reachability_report.json.
     Returns {index: bool}. Nothing moves."""
-    if TOOL_PROBE:
-        probe_tool_extents(os.path.join(OUTPUT_DIR, "tool_extents.json"))
     print("\n" + "=" * 60)
     print(f"[reach] PRE-CHECK {len(grid_points)} grid points (no motion) ...")
     report = {
@@ -1930,18 +1602,13 @@ def precheck_reachability(grid_points, q_home):
         "points": [],
     }
     ok_map = {}
-    # The executor only goes pad-to-pad AFTER a successful grasp, so the
-    # pre-check only offers prev_world after a point that passed. None means
-    # "approach from where you are", i.e. up-then-down.
-    _prev_world = None
     q_seed = np.asarray(q_home, float).copy()
     for gp in grid_points:
         idx = gp["index"]; tag = f"pt{idx:02d}"
         gw = np.array(gp["world"], float)                  # EE target (world)
         pad_world = pad_from_ee_target(gw)      # correct at any roll
         _progress(f"[reach] {tag} IK ...")
-        q_goal, path_used = _ik_at(gw, q_seed, f"{tag}:reach-ik",
-                                   prev_world=_prev_world)
+        q_goal, path_used = _ik_at(gw, q_seed, f"{tag}:reach-ik")
         if q_goal is None:
             res = {"reachable": False, "reason": "IK/plan failed (out of workspace "
                                                  "or no collision-free solution)",
@@ -1972,9 +1639,6 @@ def precheck_reachability(grid_points, q_home):
 
             if res["reachable"]:
                 q_seed = q_goal          # chain like the real run does
-                _prev_world = np.asarray(gw, float).copy()
-            else:
-                _prev_world = None
         # Only failed points get probed, so a healthy run costs nothing.
         if not res["reachable"]:
             try:
@@ -2003,8 +1667,6 @@ def precheck_reachability(grid_points, q_home):
         print(f"  {mark}{tag}  pad(y={gp['dy_mm']:+.1f}, z={gp['dz_mm']:+.1f}) "
               f"-> [{row['reason_code']}] {res['reason']}  "
               f"(path: {path_used})")
-        for _a in (res.get("advisory") or []):
-            print(f"      advisory (not fatal): {_a}")
 
     n_ok = sum(1 for v in ok_map.values() if v)
     report["n_points"] = len(grid_points)
@@ -2022,9 +1684,6 @@ def precheck_reachability(grid_points, q_home):
     report["grasp_rot_deg"] = float(ROT_DEG)
     report["use_collision_world"] = bool(USE_COLLISION_WORLD)
     report["collision_untested"] = (not USE_COLLISION_WORLD)
-    report["collision_model"] = COLLISION_MODEL_INFO
-    report["robot_yaml"] = os.path.basename(CUROBO_ROBOT_YAML)
-    report["tool_collision"] = bool(TOOL_COLLISION)
     out = os.path.join(OUTPUT_DIR, "reachability_report.json")
     try:
         with open(out, "w") as f:
@@ -2032,9 +1691,11 @@ def precheck_reachability(grid_points, q_home):
         print(f"[reach] {n_ok}/{len(grid_points)} reachable. report -> {out}")
         print("[reach] by cause: "
               + ", ".join(f"{k}={v}" for k, v in sorted(by_code.items())))
-        print("[reach] paths proved: "
-              + ", ".join(f"{k}={v}" for k, v in sorted(by_path.items()))
-              + "  (these are the routes the executor itself drives)")
+        _n_direct = by_path.get("direct", 0)
+        if _n_direct:
+            print(f"[reach] {_n_direct} point(s) certified via the DIRECT plan "
+                  f"only — the executor uses up-then-down, so those were "
+                  f"proved on a path the run does not take.")
         if not USE_COLLISION_WORLD:
             print("[reach] NOTE: USE_COLLISION_WORLD=False, so nothing was "
                   "collision-checked - 'reachable' here does NOT mean lab-safe.")
@@ -2118,164 +1779,6 @@ def hold_for(arm_q, seconds, _phase="hold"):
 # ============================================================
 # Run ALL grid points from the config (proven per-point grasp)
 # ============================================================
-# ---- TOOL EXTENT PROBE (read-only, 2026-08-07) ---------------------------
-# cuRobo's ur5e.yml stops at `tool0`, whose one sphere has radius -0.01 (i.e.
-# disabled). So the gripper, fingers and TSF-85 pads do not exist for
-# collision, and a plan that sweeps them through the rod still looks safe.
-#
-# To write sphere definitions for them we need real numbers, and eyeballing
-# the viewport is a poor way to get them. This walks the gripper subtree, reads
-# every mesh prim's world bounding box, and expresses it in the FLANGE's own
-# frame — the frame the yml spheres are written in. Purely a measurement: it
-# reads the stage and writes JSON, nothing is commanded and nothing changes.
-TOOL_PROBE = os.environ.get("GRASP_TOOL_PROBE", "0") == "1"
-
-
-def probe_tool_extents(out_path):
-    """Measure everything mounted past the flange, in the flange frame.
-
-    Writes {out_path} with, per prim, the bounding box corners expressed as
-    (x, y, z) offsets from tool0 along the TOOL axes:
-        +z = along the approach direction (toward the object)
-        +x = across the pads (the direction the fingers open)
-    plus the overall envelope, which is what the collision spheres must cover."""
-    try:
-        from pxr import Usd as _U, UsdGeom as _UG
-        _st = world.stage
-        xc = _UG.XformCache(_U.TimeCode.Default())
-        bbc = _UG.BBoxCache(_U.TimeCode.Default(),
-                            [_UG.Tokens.default_, _UG.Tokens.render])
-
-        flange = _st.GetPrimAtPath(_FLANGE_PRIM)
-        if not flange or not flange.IsValid():
-            return {"error": f"flange prim not found: {_FLANGE_PRIM}"}
-        M = xc.GetLocalToWorldTransform(flange)
-        R = np.array([[M[i][j] for j in range(3)] for i in range(3)], float).T
-        t = np.array([M[3][0], M[3][1], M[3][2]], float)
-
-        def to_flange(p):
-            return R.T @ (np.asarray(p, float) - t)
-
-        # The TSF-85 pads are SIBLINGS of the Robotiq subtree, not children of
-        # it, so the first version of this probe measured the gripper and
-        # missed the sensors entirely: it reported 130.5 mm of reach when the
-        # pad centre is known to sit at 156.6 mm. Walk every mounted subtree.
-        roots = []
-        for rp in (_GRIP_ROOT_GLOBAL,
-                   f"{ROBOT_PRIM_PATH}/robot_gripper_adapter_sensor/TSF_85_right",
-                   f"{ROBOT_PRIM_PATH}/robot_gripper_adapter_sensor/TSF_85_left"):
-            pr = _st.GetPrimAtPath(rp)
-            if pr and pr.IsValid():
-                roots.append(pr)
-            else:
-                print(f"[toolprobe] subtree NOT found (skipped): {rp}")
-        if not roots:
-            return {"error": f"no tool subtrees found under {ROBOT_PRIM_PATH}"}
-
-        items, lo, hi = [], None, None
-        for prim in [q for r in roots for q in _U.PrimRange(r)]:
-            if not prim.IsA(_UG.Boundable):
-                continue
-            try:
-                bb = bbc.ComputeWorldBound(prim).ComputeAlignedRange()
-                if bb.IsEmpty():
-                    continue
-                mn, mx = bb.GetMin(), bb.GetMax()
-            except Exception:
-                continue
-            corners = [to_flange([x, y, z])
-                       for x in (mn[0], mx[0])
-                       for y in (mn[1], mx[1])
-                       for z in (mn[2], mx[2])]
-            c = np.array(corners)
-            p_lo, p_hi = c.min(axis=0), c.max(axis=0)
-            lo = p_lo if lo is None else np.minimum(lo, p_lo)
-            hi = p_hi if hi is None else np.maximum(hi, p_hi)
-            items.append({"path": str(prim.GetPath()),
-                          "min_mm": [round(1000*v, 1) for v in p_lo],
-                          "max_mm": [round(1000*v, 1) for v in p_hi]})
-        if lo is None:
-            return {"error": "no boundable prims under the gripper root"}
-
-        # ---- WHICH FRAME DOES cuRobo WRITE ITS SPHERES IN? ---------------
-        # The measurements above are in the USD wrist_3_link frame. cuRobo
-        # builds kinematics from the URDF, where tool0 is a ROTATED child of
-        # wrist_3_link. Writing sphere centres in the wrong one of those two
-        # frames puts them in the wrong place — a collision model that is
-        # confidently wrong, which is worse than none at all.
-        #
-        # So do not assume: take cuRobo's OWN wrist spheres, map them into
-        # this same flange frame, and compare against the URDF values in
-        # ur5e.yml. If they match, the frames agree and new spheres can be
-        # written straight from the numbers above.
-        cal = {}
-        try:
-            q0 = ta.to_device(np.zeros((1, len(ARM_JOINT_NAMES)), np.float32))
-            sph = mg.kinematics.get_robot_as_spheres(q0)
-            flat = sph[0] if (sph and isinstance(sph[0], list)) else sph
-            known = {  # from ur5e.yml, in the URDF link frame (metres)
-                "wrist_3_link": [0.001, 0.001, -0.029, 0.043],
-                "wrist_2_link_a": [0.0, -0.01, -0.001, 0.047],
-            }
-            # cuRobo spheres are in the BASE frame; bring them to the flange
-            _Mf = xc.GetLocalToWorldTransform(flange)
-            _Rf = np.array([[_Mf[i][j] for j in range(3)] for i in range(3)],
-                           float).T
-            _tf = np.array([_Mf[3][0], _Mf[3][1], _Mf[3][2]], float)
-            cand = []
-            for sp in flat:
-                r = float(getattr(sp, "radius", 0.0))
-                if r <= 0:
-                    continue
-                c = np.asarray(getattr(sp, "position", [0, 0, 0]), float)
-                cand.append({"r_mm": round(1000*r, 1),
-                             "centre_in_flange_mm":
-                                 [round(1000*v, 1) for v in (_Rf.T @ (c - _tf))]})
-            cand.sort(key=lambda d: np.linalg.norm(d["centre_in_flange_mm"]))
-            cal = {"note": "cuRobo's own spheres, mapped into the flange frame. "
-                           "Compare the nearest ones against ur5e.yml "
-                           "wrist_3_link [0.001,0.001,-0.029] r0.043 to see "
-                           "whether the yml frame == this flange frame.",
-                   "yml_reference": known,
-                   "nearest_spheres": cand[:6],
-                   "n_active_spheres": len(cand)}
-            print("[toolprobe] cuRobo's nearest active spheres, in the flange "
-                  "frame (mm):")
-            for d in cand[:4]:
-                print(f"             centre {d['centre_in_flange_mm']}  "
-                      f"r={d['r_mm']}")
-            print("[toolprobe] ur5e.yml says wrist_3_link has one sphere at "
-                  "[1.0, 1.0, -29.0] mm r=43.0 — if that matches one above, "
-                  "the yml frame is this frame.")
-        except Exception as e:
-            cal = {"error": f"{type(e).__name__}: {e}"}
-            print(f"[toolprobe] sphere frame check failed ({e})")
-
-        env = {"x_mm": [round(1000*lo[0], 1), round(1000*hi[0], 1)],
-               "y_mm": [round(1000*lo[1], 1), round(1000*hi[1], 1)],
-               "z_mm": [round(1000*lo[2], 1), round(1000*hi[2], 1)]}
-        doc = {"note": "offsets from tool0/wrist_3 in the FLANGE frame; "
-                       "+z is the approach direction",
-               "grip_root": _GRIP_ROOT_GLOBAL,
-               "n_prims": len(items), "envelope": env,
-               "reach_past_flange_mm": env["z_mm"][1],
-               "half_span_x_mm": max(abs(env["x_mm"][0]), abs(env["x_mm"][1])),
-               "half_span_y_mm": max(abs(env["y_mm"][0]), abs(env["y_mm"][1])),
-               "frame_check": cal,
-               "prims": sorted(items, key=lambda d: -d["max_mm"][2])[:40]}
-        with open(out_path, "w") as f:
-            json.dump(doc, f, indent=2)
-        print(f"[toolprobe] envelope in flange frame: "
-              f"x {env['x_mm']} / y {env['y_mm']} / z {env['z_mm']} mm  "
-              f"({len(items)} prims) -> {out_path}")
-        print(f"[toolprobe] reaches {doc['reach_past_flange_mm']:.0f} mm past "
-              f"the flange; cuRobo currently models 0 mm past it.")
-        return doc
-    except Exception as e:
-        print(f"[toolprobe] FAILED ({type(e).__name__}: {e})")
-        return {"error": f"{type(e).__name__}: {e}"}
-
-
 def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
                     direct=False, retreat=True):
     """Grasp at grasp_world: approach -> record -> (optional) retreat.
@@ -2351,35 +1854,8 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
             if traj_fix is not None:
                 run_traj(traj_fix)
                 _progress(f"{tag} descent TRIM done")
-                q_now = robot.get_joint_positions()[ai].copy()
-                cpos_t, _ = fk(q_now.astype(np.float32))
-                cur_world = rotmat(ROBOT_WORLD_QUAT_WXYZ) @ cpos_t + ROBOT_WORLD_POS
-                resid_mm = 1000.0 * float(np.linalg.norm(
-                    np.asarray(grasp_world, float) - np.asarray(cur_world, float)))
             else:
-                _progress(f"{tag} descent TRIM plan failed "
-                          f"(residual {resid_mm:.2f} mm)")
-
-        # ---- DO NOT CLOSE ON A DESCENT THAT DID NOT ARRIVE (2026-08-07) ----
-        # This used to print "keeping residual" and close the fingers anyway.
-        # On the pad y=+80, 90 deg run the pads had to pass THROUGH the rod:
-        # every stitched step landed short against the obstacle, 47 mm of
-        # error accumulated, the trim failed, and the gripper then closed
-        # while jammed against the cylinder and shoved it across the table —
-        # and the ledger recorded exec_stage "complete", 1/1 grasps OK.
-        #
-        # A descent that ends far from its target has not reached the grasp
-        # pose, so whatever the pads close on is not the pose that was asked
-        # for and the tactile map would be mislabelled. Stop, and let the
-        # ledger record it as the FALSE POSITIVE it is.
-        if resid_mm > MAX_DESCENT_RESIDUAL_MM:
-            print(f"[{tag}] descent ARRIVED {resid_mm:.1f} mm SHORT of the "
-                  f"grasp pose (limit {MAX_DESCENT_RESIDUAL_MM:.1f} mm) — NOT "
-                  f"closing. Most likely something is in the way: check the "
-                  f"pad target against the object in gui_preview.png.")
-            _progress(f"{tag} descent residual {resid_mm:.1f} mm -> ABORT")
-            _ledger(_tag_index(tag), "descent_residual", False)
-            return False
+                _progress(f"{tag} descent TRIM plan failed (keeping residual)")
     q_grasp = robot.get_joint_positions()[ai].copy()
     hold_qg = q_grasp.astype(np.float32)
 

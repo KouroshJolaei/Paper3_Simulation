@@ -150,11 +150,6 @@ class CockpitGUI:
             "stitch_want_gsr": tk.BooleanVar(value=False),
             # Stitch-tab: append the blob-axis metric self-test to the report
             "blob_selftest": tk.BooleanVar(value=False),
-            # Pre-check every grid point before moving. ON by default: it costs
-            # a plan per point but stops the arm attempting poses it cannot
-            # reach. Turn OFF while iterating on a config you have already
-            # proven, to save that time. Emitted as GRASP_REACH_CHECK.
-            "reach_check": tk.BooleanVar(value=True),
             # Stitch-tab: fit the contact band width from the run's own maps
             "blob_fit_width": tk.BooleanVar(value=False),
             # ---- colour-scale policy (2026-08-04) ----
@@ -322,10 +317,6 @@ class CockpitGUI:
         ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=2, sticky="ew", pady=6); r += 1
         ttk.Checkbutton(frm, text="Run headless (no Isaac window)",
                         variable=self.vars["headless"]).grid(
-            row=r, column=0, columnspan=2, sticky="w"); r += 1
-        ttk.Checkbutton(frm, text="Pre-check reachability before moving "
-                                  "(slower, skips points the arm cannot reach)",
-                        variable=self.vars["reach_check"]).grid(
             row=r, column=0, columnspan=2, sticky="w"); r += 1
         ttk.Button(frm, text="Save Config", command=self.save_config).grid(
             row=r, column=0, columnspan=2, pady=4, sticky="ew"); r += 1
@@ -911,8 +902,6 @@ class CockpitGUI:
             f'GRASP_HEADLESS="{headless}" \\\n'
             + (f'GRASP_ROT_DEG="{_rot:g}" \\\n'
                f'GRASP_ROT_AXIS="y" \\\n' if abs(_rot) > 1e-6 else "")
-            + ("" if self.vars["reach_check"].get() else
-               'GRASP_REACH_CHECK="0" \\\n')
             + f"{ISAAC_PY} {COLLECT_PY} \\\n"
             f"  --config {CONFIG_JSON}"
         )

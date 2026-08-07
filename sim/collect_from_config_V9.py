@@ -305,43 +305,7 @@ from curobo.wrap.reacher.motion_gen import (
 EXAMPLES_DIR      = "/home/kourosh/Paper3_Simulation/TSF-85/examples"
 SCENES_DIR        = os.path.join(EXAMPLES_DIR, "scenes")
 USD_PATH          = os.path.join(SCENES_DIR, "scene_cylinder.usd")
-# ROBOT DESCRIPTION for cuRobo.
-#
-# ur5e.yml (Berith's) has tool0's only sphere at radius -0.01, i.e. DISABLED,
-# so nothing past the flange is collision-checked: the gripper, fingers and
-# pads are invisible to the planner. That is a real safety gap — at 90 deg pad
-# roll the flange passes 157 mm clear of the rod while the gripper sweeps
-# straight through it.
-#
-# ur5e_gripper.yml is a copy of his file with only that block replaced, using
-# geometry measured in-scene (probe_tool_extents). It is CORRECT about where
-# the tool is — 230 mm past the flange, confirmed — but currently too
-# CONSERVATIVE: the spheres are rotationally symmetric, so the fingers' 74.8 mm
-# span in one direction is applied all the way round, and a 76 mm envelope
-# rejects poses that have always worked.
-#
-# So it is OPT-IN, and OFF by default. Everything collected so far used the
-# stock file and keeps working untouched; the tool model can be switched on for
-# experiments without disturbing any of it.
-#
-#   GRASP_TOOL_COLLISION=1   use ur5e_gripper.yml (gripper IS collision-checked)
-#   GRASP_TOOL_COLLISION=0   use ur5e.yml (default; arm only — NOT lab-safe)
-#   GRASP_ROBOT_YAML=<path>  explicit override, wins over both
-TOOL_COLLISION = os.environ.get("GRASP_TOOL_COLLISION", "0") == "1"
-_YAML_STOCK = os.path.join(SCENES_DIR, "ur5e.yml")
-_YAML_WITH_TOOL = os.path.join(SCENES_DIR, "ur5e_gripper.yml")
-CUROBO_ROBOT_YAML = os.environ.get("GRASP_ROBOT_YAML", "")
-if not CUROBO_ROBOT_YAML:
-    if TOOL_COLLISION and os.path.exists(_YAML_WITH_TOOL):
-        CUROBO_ROBOT_YAML = _YAML_WITH_TOOL
-    else:
-        if TOOL_COLLISION:
-            print(f"[grid] GRASP_TOOL_COLLISION=1 but {_YAML_WITH_TOOL} is "
-                  f"missing — falling back to the stock description.")
-        CUROBO_ROBOT_YAML = _YAML_STOCK
-print(f"[grid] robot description: {os.path.basename(CUROBO_ROBOT_YAML)}  "
-      f"(GRASP_TOOL_COLLISION={int(TOOL_COLLISION)} -> gripper "
-      f"{'IS' if TOOL_COLLISION else 'is NOT'} collision-checked)")
+CUROBO_ROBOT_YAML = os.path.join(SCENES_DIR, "ur5e.yml")
 ROBOT_PRIM_PATH   = "/World/robot_gripper_adapter_sensor"
 SENSOR_ROOT_RIGHT = f"{ROBOT_PRIM_PATH}/TSF_85_right/TSF_85"
 # gripper subtree, used by the tool-extent probe (same path grasp_one_point
@@ -923,10 +887,8 @@ def report_collision_model():
         # first version measured plain distance from the EE, which counts the
         # shoulder and produced a nonsense 956 mm. Project onto the tool axis
         # instead — that is the question that matters.
-        ee_p, ee_q = fk(np.zeros(len(ARM_JOINT_NAMES), np.float32))
-        # the EE's OWN +z at this configuration — NOT the commanded pose's
-        # axis, which is a different orientation entirely
-        _ax = rotmat(np.asarray(ee_q, float)) @ np.array([0.0, 0.0, 1.0])
+        ee_p, _ = fk(np.zeros(len(ARM_JOINT_NAMES), np.float32))
+        _ax = APPROACH_AXIS_BASE                      # +1 = toward the object
         reach = 0.0
         for sp in flat:
             c = np.asarray(getattr(sp, "position", [0, 0, 0]), float)
@@ -1754,8 +1716,6 @@ def write_execution_ledger(out_dir):
            "grasp_rot_deg": float(ROT_DEG),
            "use_collision_world": bool(USE_COLLISION_WORLD),
            "collision_model": COLLISION_MODEL_INFO,
-           "robot_yaml": os.path.basename(CUROBO_ROBOT_YAML),
-           "tool_collision": bool(TOOL_COLLISION),
            "reach_skip": bool(REACH_SKIP),
            "counts": counts, "points": rows}
     try:
@@ -2023,8 +1983,6 @@ def precheck_reachability(grid_points, q_home):
     report["use_collision_world"] = bool(USE_COLLISION_WORLD)
     report["collision_untested"] = (not USE_COLLISION_WORLD)
     report["collision_model"] = COLLISION_MODEL_INFO
-    report["robot_yaml"] = os.path.basename(CUROBO_ROBOT_YAML)
-    report["tool_collision"] = bool(TOOL_COLLISION)
     out = os.path.join(OUTPUT_DIR, "reachability_report.json")
     try:
         with open(out, "w") as f:

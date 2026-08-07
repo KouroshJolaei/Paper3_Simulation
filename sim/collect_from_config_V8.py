@@ -305,51 +305,9 @@ from curobo.wrap.reacher.motion_gen import (
 EXAMPLES_DIR      = "/home/kourosh/Paper3_Simulation/TSF-85/examples"
 SCENES_DIR        = os.path.join(EXAMPLES_DIR, "scenes")
 USD_PATH          = os.path.join(SCENES_DIR, "scene_cylinder.usd")
-# ROBOT DESCRIPTION for cuRobo.
-#
-# ur5e.yml (Berith's) has tool0's only sphere at radius -0.01, i.e. DISABLED,
-# so nothing past the flange is collision-checked: the gripper, fingers and
-# pads are invisible to the planner. That is a real safety gap — at 90 deg pad
-# roll the flange passes 157 mm clear of the rod while the gripper sweeps
-# straight through it.
-#
-# ur5e_gripper.yml is a copy of his file with only that block replaced, using
-# geometry measured in-scene (probe_tool_extents). It is CORRECT about where
-# the tool is — 230 mm past the flange, confirmed — but currently too
-# CONSERVATIVE: the spheres are rotationally symmetric, so the fingers' 74.8 mm
-# span in one direction is applied all the way round, and a 76 mm envelope
-# rejects poses that have always worked.
-#
-# So it is OPT-IN, and OFF by default. Everything collected so far used the
-# stock file and keeps working untouched; the tool model can be switched on for
-# experiments without disturbing any of it.
-#
-#   GRASP_TOOL_COLLISION=1   use ur5e_gripper.yml (gripper IS collision-checked)
-#   GRASP_TOOL_COLLISION=0   use ur5e.yml (default; arm only — NOT lab-safe)
-#   GRASP_ROBOT_YAML=<path>  explicit override, wins over both
-TOOL_COLLISION = os.environ.get("GRASP_TOOL_COLLISION", "0") == "1"
-_YAML_STOCK = os.path.join(SCENES_DIR, "ur5e.yml")
-_YAML_WITH_TOOL = os.path.join(SCENES_DIR, "ur5e_gripper.yml")
-CUROBO_ROBOT_YAML = os.environ.get("GRASP_ROBOT_YAML", "")
-if not CUROBO_ROBOT_YAML:
-    if TOOL_COLLISION and os.path.exists(_YAML_WITH_TOOL):
-        CUROBO_ROBOT_YAML = _YAML_WITH_TOOL
-    else:
-        if TOOL_COLLISION:
-            print(f"[grid] GRASP_TOOL_COLLISION=1 but {_YAML_WITH_TOOL} is "
-                  f"missing — falling back to the stock description.")
-        CUROBO_ROBOT_YAML = _YAML_STOCK
-print(f"[grid] robot description: {os.path.basename(CUROBO_ROBOT_YAML)}  "
-      f"(GRASP_TOOL_COLLISION={int(TOOL_COLLISION)} -> gripper "
-      f"{'IS' if TOOL_COLLISION else 'is NOT'} collision-checked)")
+CUROBO_ROBOT_YAML = os.path.join(SCENES_DIR, "ur5e.yml")
 ROBOT_PRIM_PATH   = "/World/robot_gripper_adapter_sensor"
 SENSOR_ROOT_RIGHT = f"{ROBOT_PRIM_PATH}/TSF_85_right/TSF_85"
-# gripper subtree, used by the tool-extent probe (same path grasp_one_point
-# uses for its per-grasp probe)
-_GRIP_ROOT_GLOBAL = (f"{ROBOT_PRIM_PATH}/robot_gripper_adapter_sensor"
-                     f"/Robotiq_2F_85_adapter_fixed_v_sibling__1_"
-                     f"/Robotiq_2F_85_modified/Robotiq_2F_85")
-_FLANGE_PRIM = f"{ROBOT_PRIM_PATH}/robot_gripper_adapter_sensor/ur5e/wrist_3_link"
 SENSOR_ROOT_LEFT  = f"{ROBOT_PRIM_PATH}/TSF_85_left/TSF_85"
 TSF_EXT_SEARCH    = "/home/kourosh/Paper3_Simulation/TSF-85"
 
@@ -919,24 +877,15 @@ def report_collision_model():
         spheres = mg.kinematics.get_robot_as_spheres(q0)
         flat = spheres[0] if (spheres and isinstance(spheres[0], list)) else spheres
         n = len(flat)
-        # How far FORWARD along the approach axis does any sphere reach? The
-        # first version measured plain distance from the EE, which counts the
-        # shoulder and produced a nonsense 956 mm. Project onto the tool axis
-        # instead — that is the question that matters.
-        ee_p, ee_q = fk(np.zeros(len(ARM_JOINT_NAMES), np.float32))
-        # the EE's OWN +z at this configuration — NOT the commanded pose's
-        # axis, which is a different orientation entirely
-        _ax = rotmat(np.asarray(ee_q, float)) @ np.array([0.0, 0.0, 1.0])
+        ee_p, _ = fk(np.zeros(len(ARM_JOINT_NAMES), np.float32))
         reach = 0.0
         for sp in flat:
             c = np.asarray(getattr(sp, "position", [0, 0, 0]), float)
             r = float(getattr(sp, "radius", 0.0))
-            if r <= 0.0:                              # negative radius = disabled
-                continue
-            reach = max(reach, float((c - ee_p) @ _ax) + r)
+            reach = max(reach, float(np.linalg.norm(c - ee_p)) + r)
         print(f"[grid] collision model: {n} spheres, reaching "
-              f"{1000*reach:.0f} mm PAST the flange along the tool axis; the "
-              f"pad sits {1000*TOOL_OFFSET_Z:.0f} mm past it.")
+              f"{1000*reach:.0f} mm beyond the flange; the pad sits "
+              f"{1000*TOOL_OFFSET_Z:.0f} mm beyond it.")
         if reach < TOOL_OFFSET_Z * 0.6:
             print("[grid] !! THE GRIPPER IS NOT IN THE COLLISION MODEL. cuRobo "
                   "can only collide the arm, so a plan that sweeps the FINGERS "
@@ -953,10 +902,7 @@ def report_collision_model():
         return {"error": f"{type(e).__name__}: {e}"}
 
 
-# NOTE: this used to be called HERE and crashed every run with
-# "NameError: name 'fk' is not defined" — fk() is defined further down. It is
-# now called after fk exists (search COLLISION_MODEL_INFO below).
-COLLISION_MODEL_INFO = None
+COLLISION_MODEL_INFO = report_collision_model() if USE_COLLISION_WORLD else None
 
 # ---- Tool orientation, with OPTIONAL finger rotation ----
 # Base tool-down orientation (same as your working grasp):
@@ -1136,12 +1082,6 @@ def fk(q):
 #   pad pose from joints -> cuRobo FK -> EE world -> fixed wrist->pad offset
 #   (the Paper-2 logic; offset probed in THIS scene by probe_pad_normal.py).
 PAD_OFF_WRIST = np.array([-0.0142, 0.0624, 0.1214])   # m, wrist_3-local (probed)
-
-
-# deferred from the cuRobo setup block above: report_collision_model() needs
-# fk(), which only exists from here down.
-if USE_COLLISION_WORLD:
-    COLLISION_MODEL_INFO = report_collision_model()
 
 def pad_pose_from_joints(q_arm):
     """(pos[3], R[3x3]) of the pad frame in WORLD, from the arm joints.
@@ -1754,8 +1694,6 @@ def write_execution_ledger(out_dir):
            "grasp_rot_deg": float(ROT_DEG),
            "use_collision_world": bool(USE_COLLISION_WORLD),
            "collision_model": COLLISION_MODEL_INFO,
-           "robot_yaml": os.path.basename(CUROBO_ROBOT_YAML),
-           "tool_collision": bool(TOOL_COLLISION),
            "reach_skip": bool(REACH_SKIP),
            "counts": counts, "points": rows}
     try:
@@ -1914,8 +1852,6 @@ def ik_probe(ee_world, tag):
 def precheck_reachability(grid_points, q_home):
     """Dry-run EVERY grid point BEFORE any motion. Writes reachability_report.json.
     Returns {index: bool}. Nothing moves."""
-    if TOOL_PROBE:
-        probe_tool_extents(os.path.join(OUTPUT_DIR, "tool_extents.json"))
     print("\n" + "=" * 60)
     print(f"[reach] PRE-CHECK {len(grid_points)} grid points (no motion) ...")
     report = {
@@ -2023,8 +1959,6 @@ def precheck_reachability(grid_points, q_home):
     report["use_collision_world"] = bool(USE_COLLISION_WORLD)
     report["collision_untested"] = (not USE_COLLISION_WORLD)
     report["collision_model"] = COLLISION_MODEL_INFO
-    report["robot_yaml"] = os.path.basename(CUROBO_ROBOT_YAML)
-    report["tool_collision"] = bool(TOOL_COLLISION)
     out = os.path.join(OUTPUT_DIR, "reachability_report.json")
     try:
         with open(out, "w") as f:
@@ -2118,164 +2052,6 @@ def hold_for(arm_q, seconds, _phase="hold"):
 # ============================================================
 # Run ALL grid points from the config (proven per-point grasp)
 # ============================================================
-# ---- TOOL EXTENT PROBE (read-only, 2026-08-07) ---------------------------
-# cuRobo's ur5e.yml stops at `tool0`, whose one sphere has radius -0.01 (i.e.
-# disabled). So the gripper, fingers and TSF-85 pads do not exist for
-# collision, and a plan that sweeps them through the rod still looks safe.
-#
-# To write sphere definitions for them we need real numbers, and eyeballing
-# the viewport is a poor way to get them. This walks the gripper subtree, reads
-# every mesh prim's world bounding box, and expresses it in the FLANGE's own
-# frame — the frame the yml spheres are written in. Purely a measurement: it
-# reads the stage and writes JSON, nothing is commanded and nothing changes.
-TOOL_PROBE = os.environ.get("GRASP_TOOL_PROBE", "0") == "1"
-
-
-def probe_tool_extents(out_path):
-    """Measure everything mounted past the flange, in the flange frame.
-
-    Writes {out_path} with, per prim, the bounding box corners expressed as
-    (x, y, z) offsets from tool0 along the TOOL axes:
-        +z = along the approach direction (toward the object)
-        +x = across the pads (the direction the fingers open)
-    plus the overall envelope, which is what the collision spheres must cover."""
-    try:
-        from pxr import Usd as _U, UsdGeom as _UG
-        _st = world.stage
-        xc = _UG.XformCache(_U.TimeCode.Default())
-        bbc = _UG.BBoxCache(_U.TimeCode.Default(),
-                            [_UG.Tokens.default_, _UG.Tokens.render])
-
-        flange = _st.GetPrimAtPath(_FLANGE_PRIM)
-        if not flange or not flange.IsValid():
-            return {"error": f"flange prim not found: {_FLANGE_PRIM}"}
-        M = xc.GetLocalToWorldTransform(flange)
-        R = np.array([[M[i][j] for j in range(3)] for i in range(3)], float).T
-        t = np.array([M[3][0], M[3][1], M[3][2]], float)
-
-        def to_flange(p):
-            return R.T @ (np.asarray(p, float) - t)
-
-        # The TSF-85 pads are SIBLINGS of the Robotiq subtree, not children of
-        # it, so the first version of this probe measured the gripper and
-        # missed the sensors entirely: it reported 130.5 mm of reach when the
-        # pad centre is known to sit at 156.6 mm. Walk every mounted subtree.
-        roots = []
-        for rp in (_GRIP_ROOT_GLOBAL,
-                   f"{ROBOT_PRIM_PATH}/robot_gripper_adapter_sensor/TSF_85_right",
-                   f"{ROBOT_PRIM_PATH}/robot_gripper_adapter_sensor/TSF_85_left"):
-            pr = _st.GetPrimAtPath(rp)
-            if pr and pr.IsValid():
-                roots.append(pr)
-            else:
-                print(f"[toolprobe] subtree NOT found (skipped): {rp}")
-        if not roots:
-            return {"error": f"no tool subtrees found under {ROBOT_PRIM_PATH}"}
-
-        items, lo, hi = [], None, None
-        for prim in [q for r in roots for q in _U.PrimRange(r)]:
-            if not prim.IsA(_UG.Boundable):
-                continue
-            try:
-                bb = bbc.ComputeWorldBound(prim).ComputeAlignedRange()
-                if bb.IsEmpty():
-                    continue
-                mn, mx = bb.GetMin(), bb.GetMax()
-            except Exception:
-                continue
-            corners = [to_flange([x, y, z])
-                       for x in (mn[0], mx[0])
-                       for y in (mn[1], mx[1])
-                       for z in (mn[2], mx[2])]
-            c = np.array(corners)
-            p_lo, p_hi = c.min(axis=0), c.max(axis=0)
-            lo = p_lo if lo is None else np.minimum(lo, p_lo)
-            hi = p_hi if hi is None else np.maximum(hi, p_hi)
-            items.append({"path": str(prim.GetPath()),
-                          "min_mm": [round(1000*v, 1) for v in p_lo],
-                          "max_mm": [round(1000*v, 1) for v in p_hi]})
-        if lo is None:
-            return {"error": "no boundable prims under the gripper root"}
-
-        # ---- WHICH FRAME DOES cuRobo WRITE ITS SPHERES IN? ---------------
-        # The measurements above are in the USD wrist_3_link frame. cuRobo
-        # builds kinematics from the URDF, where tool0 is a ROTATED child of
-        # wrist_3_link. Writing sphere centres in the wrong one of those two
-        # frames puts them in the wrong place — a collision model that is
-        # confidently wrong, which is worse than none at all.
-        #
-        # So do not assume: take cuRobo's OWN wrist spheres, map them into
-        # this same flange frame, and compare against the URDF values in
-        # ur5e.yml. If they match, the frames agree and new spheres can be
-        # written straight from the numbers above.
-        cal = {}
-        try:
-            q0 = ta.to_device(np.zeros((1, len(ARM_JOINT_NAMES)), np.float32))
-            sph = mg.kinematics.get_robot_as_spheres(q0)
-            flat = sph[0] if (sph and isinstance(sph[0], list)) else sph
-            known = {  # from ur5e.yml, in the URDF link frame (metres)
-                "wrist_3_link": [0.001, 0.001, -0.029, 0.043],
-                "wrist_2_link_a": [0.0, -0.01, -0.001, 0.047],
-            }
-            # cuRobo spheres are in the BASE frame; bring them to the flange
-            _Mf = xc.GetLocalToWorldTransform(flange)
-            _Rf = np.array([[_Mf[i][j] for j in range(3)] for i in range(3)],
-                           float).T
-            _tf = np.array([_Mf[3][0], _Mf[3][1], _Mf[3][2]], float)
-            cand = []
-            for sp in flat:
-                r = float(getattr(sp, "radius", 0.0))
-                if r <= 0:
-                    continue
-                c = np.asarray(getattr(sp, "position", [0, 0, 0]), float)
-                cand.append({"r_mm": round(1000*r, 1),
-                             "centre_in_flange_mm":
-                                 [round(1000*v, 1) for v in (_Rf.T @ (c - _tf))]})
-            cand.sort(key=lambda d: np.linalg.norm(d["centre_in_flange_mm"]))
-            cal = {"note": "cuRobo's own spheres, mapped into the flange frame. "
-                           "Compare the nearest ones against ur5e.yml "
-                           "wrist_3_link [0.001,0.001,-0.029] r0.043 to see "
-                           "whether the yml frame == this flange frame.",
-                   "yml_reference": known,
-                   "nearest_spheres": cand[:6],
-                   "n_active_spheres": len(cand)}
-            print("[toolprobe] cuRobo's nearest active spheres, in the flange "
-                  "frame (mm):")
-            for d in cand[:4]:
-                print(f"             centre {d['centre_in_flange_mm']}  "
-                      f"r={d['r_mm']}")
-            print("[toolprobe] ur5e.yml says wrist_3_link has one sphere at "
-                  "[1.0, 1.0, -29.0] mm r=43.0 — if that matches one above, "
-                  "the yml frame is this frame.")
-        except Exception as e:
-            cal = {"error": f"{type(e).__name__}: {e}"}
-            print(f"[toolprobe] sphere frame check failed ({e})")
-
-        env = {"x_mm": [round(1000*lo[0], 1), round(1000*hi[0], 1)],
-               "y_mm": [round(1000*lo[1], 1), round(1000*hi[1], 1)],
-               "z_mm": [round(1000*lo[2], 1), round(1000*hi[2], 1)]}
-        doc = {"note": "offsets from tool0/wrist_3 in the FLANGE frame; "
-                       "+z is the approach direction",
-               "grip_root": _GRIP_ROOT_GLOBAL,
-               "n_prims": len(items), "envelope": env,
-               "reach_past_flange_mm": env["z_mm"][1],
-               "half_span_x_mm": max(abs(env["x_mm"][0]), abs(env["x_mm"][1])),
-               "half_span_y_mm": max(abs(env["y_mm"][0]), abs(env["y_mm"][1])),
-               "frame_check": cal,
-               "prims": sorted(items, key=lambda d: -d["max_mm"][2])[:40]}
-        with open(out_path, "w") as f:
-            json.dump(doc, f, indent=2)
-        print(f"[toolprobe] envelope in flange frame: "
-              f"x {env['x_mm']} / y {env['y_mm']} / z {env['z_mm']} mm  "
-              f"({len(items)} prims) -> {out_path}")
-        print(f"[toolprobe] reaches {doc['reach_past_flange_mm']:.0f} mm past "
-              f"the flange; cuRobo currently models 0 mm past it.")
-        return doc
-    except Exception as e:
-        print(f"[toolprobe] FAILED ({type(e).__name__}: {e})")
-        return {"error": f"{type(e).__name__}: {e}"}
-
-
 def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
                     direct=False, retreat=True):
     """Grasp at grasp_world: approach -> record -> (optional) retreat.
