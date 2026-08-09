@@ -113,38 +113,6 @@ def grid_2d(nx, ny, step_mm, centered=False):
                 break
     return pts
 
-
-def rotate_offsets(offs, roll_deg):
-    """Turn a WORLD-aligned lattice into one aligned with the PAD's own edges.
-
-    WHY (2026-08-09). grid_2d lays the pad centres out on a square lattice in
-    world Y and Z. With an upright pad that is also the pad's own frame, so
-    the sweep covers a clean rectangle. Roll the pad and the two stop
-    agreeing: the footprints turn but the lattice does not, so the swept
-    region comes out as a sheared, serrated quilt whose edges follow world Y/Z
-    while every pad in it points 45 deg away. That is visible as the staircase
-    envelope in the coverage panel of run_20260808_180415_obj0_pad45.
-
-    Rotating the offsets by the same angle as the footprint puts the steps
-    along the pad's width and height, so the swept region becomes a rectangle
-    that is merely tilted — which is what a scan along the pad's edges means.
-
-    SIGN. Deliberately the SAME matrix the preview uses to draw the rolled
-    footprint a few hundred lines below (`_k @ [[c, s], [-s, c]]` on rows of
-    [y, z]), so the lattice and the rectangles it carries can never disagree
-    about which way positive roll turns.
-
-    offs entries are (gx, gy) = (Z step, Y step) — grid_2d's order, kept.
-    A roll of 0 returns the input unchanged, so upright runs are untouched."""
-    if abs(float(roll_deg)) < 1e-9:
-        return [(float(gx), float(gy)) for gx, gy in offs]
-    c, s = np.cos(np.radians(float(roll_deg))), np.sin(np.radians(float(roll_deg)))
-    out = []
-    for gx, gy in offs:                      # gy along world Y, gx along world Z
-        out.append((float(gy * s + gx * c),  # new Z
-                    float(gy * c - gx * s)))  # new Y
-    return out
-
 class CockpitGUI:
     def __init__(self, root):
         self.root = root
@@ -173,7 +141,6 @@ class CockpitGUI:
             "grid_step": tk.StringVar(value="8.0"),   # mm
             # grid mirrors around the entered pad offset instead of starting there
             "grid_centered": tk.BooleanVar(value=False),
-            "grid_pad_frame": tk.BooleanVar(value=True),
             "headless": tk.BooleanVar(value=False),   # False = show Isaac window
             "calib_headless": tk.BooleanVar(value=False),  # Calibrate tab headless toggle
             "calib_dz": tk.StringVar(value="0.0"),  # Calibrate pad Z offset (Y stays centered)
@@ -346,11 +313,6 @@ class CockpitGUI:
                         variable=self.vars["grid_centered"],
                         command=self.refresh).grid(
             row=r, column=0, columnspan=2, sticky="w"); r += 1
-        ttk.Checkbutton(frm, text="step along PAD axes (rolled pad sweeps a "
-                                  "tilted rectangle, not a sheared quilt)",
-                        variable=self.vars["grid_pad_frame"],
-                        command=self.refresh).grid(
-            row=r, column=0, columnspan=2, sticky="w"); r += 1
         self.grid_count = ttk.Label(frm, text="", foreground="#555")
         self.grid_count.grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
 
@@ -496,7 +458,6 @@ class CockpitGUI:
                 "ny": inum("grid_ny"),
                 "step": fnum("grid_step", 1.0),
                 "centered": bool(self.vars["grid_centered"].get()),
-                "pad_frame": bool(self.vars["grid_pad_frame"].get()),
             }
         except Exception:
             return None
@@ -509,19 +470,11 @@ class CockpitGUI:
         obj, pad = cfg["obj"], cfg["pad"]
         offs = grid_2d(cfg["nx"], cfg["ny"], cfg["step"],
                        centered=cfg["centered"])            # (dx,dy) mm
-        _rolled = abs(cfg["pad_rot"]) > 1e-6
-        _pad_frame = bool(cfg["pad_frame"])
-        if _pad_frame:
-            offs = rotate_offsets(offs, cfg["pad_rot"])
         if hasattr(self, "grid_count"):
             _j = [float(np.hypot(offs[i+1][0]-offs[i][0],
                                  offs[i+1][1]-offs[i][1]))
                   for i in range(len(offs)-1)]
             _mx = max(_j) if _j else 0.0
-            # The rolled-pad warning now fires only when the steps are NOT
-            # following the pad, which is the case that actually shears the
-            # swept region.
-            _warn = _rolled and (not _pad_frame) and len(offs) > 1
             self.grid_count.config(
                 text=f"{len(offs)} grasp points"
                      + ("  (centered: n = per side)" if cfg["centered"]
@@ -529,10 +482,10 @@ class CockpitGUI:
                      + f"   ~{len(offs) * 2.5:.0f} min"
                      + f"   max jump {_mx:.1f} mm"
                      + ("   ⚠ pad rolled: grid still steps in world Y/Z"
-                        if _warn else
-                        (f"   steps follow the pad ({cfg['pad_rot']:+.0f}°)"
-                         if (_rolled and _pad_frame and len(offs) > 1) else "")),
-                foreground=("#b00" if (_mx > 15.0 or _warn) else "#555"))
+                        if (abs(cfg["pad_rot"]) > 1e-6 and len(offs) > 1) else ""),
+                foreground=("#b00" if (_mx > 15.0
+                                       or (abs(cfg["pad_rot"]) > 1e-6
+                                           and len(offs) > 1)) else "#555"))
 
         # ---------- TOP-DOWN (X-Y): two pads squeezing the cylinder along X ----------
         ax = self.ax_top; ax.clear()
@@ -586,7 +539,7 @@ class CockpitGUI:
         # colour by reachability if a report has been loaded:
         #   green = reachable, red = unreachable, crimson = not checked yet
         _rm = getattr(self, "reach_map", None) or {}
-        _lbl_done = {"ok": False, "bad": False, "raw": False, "first": False}
+        _lbl_done = {"ok": False, "bad": False, "raw": False}
         for i, (gx, gy) in enumerate(offs):
             py = pad[1] + gy - PAD_W/2
             pz = pad[2] + gx - PAD_H/2   # use X-grid as the up/down (Z) sweep on the face
@@ -602,22 +555,10 @@ class CockpitGUI:
                 col, ls = "crimson", "-"
                 lab = "pad" if not _lbl_done["raw"] else None
                 _lbl_done["raw"] = True
-            # pt00 IS THE ANCHOR: it is the pose every other grasp is
-            # extrapolated from, and the one the stitcher uses as the initial
-            # frame, so it should not look like any other point in the grid.
-            # Drawn purple and heavier. Reachability stays readable through
-            # the LINESTYLE (dashed = unreachable), so no information is lost.
-            _lw = 1.5
-            if i == 0:
-                col = "#7b2fbe"
-                _lw = 2.8
-                lab = ("pt00 (initial pad pose)" if not _lbl_done["first"]
-                       else None)
-                _lbl_done["first"] = True
             if abs(cfg["pad_rot"]) < 1e-6:
                 ax.add_patch(mpatches.Rectangle((py, pz), PAD_W, PAD_H,
                                                 fill=False, edgecolor=col,
-                                                linewidth=_lw, linestyle=ls,
+                                                linewidth=1.5, linestyle=ls,
                                                 label=lab))
             else:
                 # Rotate the footprint about the PAD CENTRE, not a corner.
@@ -630,10 +571,9 @@ class CockpitGUI:
                 _kr = _k @ np.array([[_c, _s], [-_s, _c]])
                 ax.add_patch(mpatches.Polygon(_kr + [_cy, _cz], closed=True,
                                               fill=False, edgecolor=col,
-                                              linewidth=_lw, linestyle=ls,
+                                              linewidth=1.5, linestyle=ls,
                                               label=lab))
-            ax.scatter(pad[1]+gy, pad[2]+gx, color=col, s=(22 if i == 0 else 10),
-                       zorder=(6 if i == 0 else 3))
+            ax.scatter(pad[1]+gy, pad[2]+gx, color=col, s=10)
         # visit path: the exact order the collector executes (pt00 -> last)
         if len(offs) > 1:
             px = [pad[1] + gy for gx, gy in offs]
@@ -775,13 +715,6 @@ class CockpitGUI:
             return None
         offs = grid_2d(cfg["nx"], cfg["ny"], cfg["step"],
                        centered=cfg["centered"])   # (dx,dy) mm on the face
-        # Steps follow the PAD's own edges unless switched off. The rotation
-        # happens HERE, once, so pad_offset_y/z_mm in the file are already the
-        # world offsets every consumer needs — the collector reads them
-        # straight (GRID_POINTS), heatmaps draws `planned` from them, and the
-        # stitcher never sees them at all. Nothing downstream has to know.
-        if cfg["pad_frame"]:
-            offs = rotate_offsets(offs, cfg["pad_rot"])
         # each grasp point = pad offset from object centre (y,z), plus the base pad offset
         points = []
         for k, (gx, gy) in enumerate(offs):
@@ -811,12 +744,6 @@ class CockpitGUI:
             "grid": {
                 "nx": cfg["nx"], "ny": cfg["ny"], "step_mm": cfg["step"],
                 "centered": cfg["centered"],
-                # provenance: were pad_offset_y/z_mm stepped along world Y/Z,
-                # or along the pad's own edges? Reading a run months later,
-                # this is the only thing that says which.
-                "step_frame": "pad" if cfg["pad_frame"] else "world",
-                "step_roll_deg": (float(cfg["pad_rot"]) if cfg["pad_frame"]
-                                  else 0.0),
                 "n_points": len(points),
             },
             "points": points,
@@ -948,15 +875,6 @@ class CockpitGUI:
             if src == "config" and "grid_centered" in self.vars:
                 self.vars["grid_centered"].set(
                     bool((doc.get("grid") or {}).get("centered", False)))
-                n += 1
-            if src == "config" and "grid_pad_frame" in self.vars:
-                # Files written before 2026-08-09 have no step_frame key and
-                # were, by definition, stepped in world Y/Z — so default to
-                # "world" here rather than to the new behaviour, or reloading
-                # an old config would silently redesign its grid.
-                self.vars["grid_pad_frame"].set(
-                    str((doc.get("grid") or {}).get("step_frame", "world"))
-                    == "pad")
                 n += 1
 
             if n == 0:
@@ -1977,7 +1895,7 @@ class CockpitGUI:
                 "Stitching failed:\n\n" + traceback.format_exc())
 
     def do_export_pair(self):
-        import traceback, glob
+        import traceback
         try:
             mod = self._load_stitching_module()
             if mod is None:
@@ -1985,47 +1903,11 @@ class CockpitGUI:
                     "stitching.py not found (expected in viz/).")
                 return
             run = self._stitch_target_dir()
-            # The res box drives the FIGURES. The training pair has its own
-            # pinned canvas (1.0 mm, 96 mm square, pad frame) so every run
-            # exports one tensor shape — passing the box value here would
-            # undo that, so it is deliberately not passed.
-            npz = mod.export_pair(run)
-
-            # export_pair returns None when it REFUSES — the run's designed
-            # initial grasp was never collected, so the pair would be built on
-            # a substitute. This used to report success in green with the word
-            # "None" as the filename, which is the exact silent-substitution
-            # failure the stitcher fix removed; do not reintroduce it here.
-            if not npz:
-                want = getattr(mod, "INITIAL_GRASP", "pt00")
-                # use stitching's OWN key parser, so the point names quoted
-                # here cannot drift from the ones it just complained about
-                _key = getattr(mod, "_pt_key", None)
-                have = sorted({k for k in
-                               (_key(os.path.basename(p)) if _key else None
-                                for p in glob.glob(os.path.join(
-                                    run, "*_pt*_s1_tactile_maps.csv")))
-                               if k})
-                span = (f"{have[0]}..{have[-1]} ({len(have)} points)"
-                        if have else "none found")
-                self.stitch_status.config(
-                    text=f"NO training pair written — designed initial grasp "
-                         f"{want} is missing from this run",
-                    foreground="#b00")
-                messagebox.showwarning("Training pair REFUSED",
-                    f"No training_pair.npz was written for:\n{run}\n\n"
-                    f"The designed initial grasp {want} is not in this run.\n"
-                    f"Collected: {span}\n\n"
-                    "The stitched maps and figures are unaffected and still "
-                    "valid — only the training pair is refused, because its "
-                    "input frame would be a substitute grasp and nothing in "
-                    "the file would say so.\n\n"
-                    "Either re-collect the missing point (check "
-                    "execution_ledger.json for why it failed), or set "
-                    "STITCH_ALLOW_FALLBACK=1 to export with the substitution "
-                    "recorded in the meta.")
-                return
-
+            try:
+                res = float(self.vars["stitch_res"].get())
+            except Exception:
+                res = 1.0
+            npz = mod.export_pair(run, res)
             self.stitch_status.config(
                 text=f"training pair exported:\n{npz}", foreground="#0a6")
         except Exception:

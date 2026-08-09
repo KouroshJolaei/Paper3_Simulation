@@ -206,25 +206,6 @@ REACH_SKIP  = os.environ.get("GRASP_REACH_SKIP", "1") == "1"  # skip unreachable
 # evaluate_reachability. Set 1 for the old veto behaviour.
 REACH_STRICT = os.environ.get("GRASP_REACH_STRICT", "0") == "1"
 
-# ---- THE INITIAL POINT IS NOT AN ORDINARY POINT (2026-08-08) ----------------
-# Every run exists to produce ONE training pair: the initial grasp as input,
-# the stitch as target. Lose the initial point and the other 24 grasps cannot
-# become a pair no matter how clean they are — which is exactly what happened
-# on run_20260808_131104_obj0_pad45: pt00 failed its free move to UP, the run
-# carried on for twenty minutes, and the stitcher had to refuse the export.
-# Re-running the identical config later succeeded, so the failure is
-# INTERMITTENT, not a property of the pose.
-#
-#   GRASP_INITIAL_RETRIES=N   attempts to re-do the initial point (default 1;
-#                             0 restores the old no-retry behaviour)
-#   GRASP_ABORT_ON_INITIAL=0  keep collecting even with the initial point lost
-#                             (the old behaviour; the pair will be refused)
-#
-# A run that needed a retry is FLAGGED in execution_ledger.json rather than
-# quietly repaired, so an intermittent fault stays countable at audit time.
-INITIAL_RETRIES = max(0, int(os.environ.get("GRASP_INITIAL_RETRIES", "1")))
-ABORT_ON_INITIAL = os.environ.get("GRASP_ABORT_ON_INITIAL", "1") == "1"
-
 # where to write data — fresh timestamped folder per run (no old data mixing in)
 import datetime as _dt
 _stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1709,14 +1690,8 @@ def _reach_reason_code(res, path_used):
 # probably have worked. Neither was ever recorded, so the disagreement rate is
 # unknown. This ledger writes it down for every point of every run —
 # diagnostic only, it changes no decision.
-EXEC_LEDGER = {}          # index -> {"stage": ..., "ok": bool}   (LAST attempt)
-EXEC_ATTEMPTS = {}        # index -> [{"attempt": n, "stage": ..., "ok": ...}]
+EXEC_LEDGER = {}          # index -> {"stage": ..., "ok": bool}
 _REACH_ROWS = {}          # index -> the pre-check row for that point
-
-# Run-level outcome, written into execution_ledger.json. "retry_required" is
-# the audit flag: the run succeeded, but only on a second attempt.
-RUN_STATUS = {"initial_tag": None, "retries_used": 0,
-              "retry_required": False, "aborted": False, "abort_reason": None}
 
 
 def _tag_index(tag):
@@ -1728,44 +1703,11 @@ def _tag_index(tag):
 
 
 def _ledger(idx, stage, ok):
-    """Record how far a point got. Called at every exit of grasp_one_point.
-
-    Keeps EVERY attempt. With retries a bare last-attempt record would show a
-    clean run and erase the fact that the first try failed, which is precisely
-    the information needed to tell an intermittent planner fault from a pose
-    that is genuinely unreachable."""
+    """Record how far a point got. Called at every exit of grasp_one_point."""
     try:
-        i = int(idx)
-        lst = EXEC_ATTEMPTS.setdefault(i, [])
-        rec = {"stage": str(stage), "ok": bool(ok)}
-        lst.append({"attempt": len(lst) + 1, **rec})
-        EXEC_LEDGER[i] = rec
+        EXEC_LEDGER[int(idx)] = {"stage": str(stage), "ok": bool(ok)}
     except Exception:
         pass
-
-
-def _discard_pending_tactile(row_marks):
-    """Drop tactile rows produced by a FAILED attempt.
-
-    A failure at the descent-residual guard happens after the pads have already
-    descended, so the raw per-sensor stream may hold frames from that aborted
-    attempt. row_marks is only advanced when a grasp SUCCEEDS, so without this
-    the retry's CSV would begin with the failed attempt's frames and its
-    hold-average would be computed over both."""
-    for s in ("s1", "s2"):
-        src = os.path.join(OUTPUT_DIR, f"{BASENAME}_{s}_tactile_maps.csv")
-        if not os.path.exists(src):
-            continue
-        try:
-            with open(src) as f:
-                n = max(0, len(f.readlines()) - 1)      # minus the header
-            dropped = n - int(row_marks.get(s, 0))
-            row_marks[s] = n
-            if dropped > 0:
-                print(f"[retry] discarded {dropped} {s} frames from the "
-                      f"failed attempt")
-        except Exception as e:
-            print(f"[retry] could not discard {s} frames ({e})")
 
 
 def write_execution_ledger(out_dir):
@@ -1800,18 +1742,14 @@ def write_execution_ledger(out_dir):
         else:
             outcome = "predicted_bad_skipped"
         counts[outcome] = counts.get(outcome, 0) + 1
-        row = {"index": idx, "tag": f"pt{idx:02d}",
-               "predicted_reachable": pred_ok,
-               "reason_code": pre.get("reason_code"),
-               "reason": pre.get("reason"),
-               "precheck_path": pre.get("precheck_path"),
-               "executed": (ex or {}).get("ok"),
-               "exec_stage": (ex or {}).get("stage"),
-               "outcome": outcome}
-        _att = EXEC_ATTEMPTS.get(idx, [])
-        if len(_att) > 1:                 # only when something was retried
-            row["attempts"] = _att
-        rows.append(row)
+        rows.append({"index": idx, "tag": f"pt{idx:02d}",
+                     "predicted_reachable": pred_ok,
+                     "reason_code": pre.get("reason_code"),
+                     "reason": pre.get("reason"),
+                     "precheck_path": pre.get("precheck_path"),
+                     "executed": (ex or {}).get("ok"),
+                     "exec_stage": (ex or {}).get("stage"),
+                     "outcome": outcome})
     doc = {"generated": _stamp, "config": _args.config,
            "grasp_rot_deg": float(ROT_DEG),
            "use_collision_world": bool(USE_COLLISION_WORLD),
@@ -1819,11 +1757,6 @@ def write_execution_ledger(out_dir):
            "robot_yaml": os.path.basename(CUROBO_ROBOT_YAML),
            "tool_collision": bool(TOOL_COLLISION),
            "reach_skip": bool(REACH_SKIP),
-           "initial_point": RUN_STATUS["initial_tag"],
-           "initial_retries_used": RUN_STATUS["retries_used"],
-           "initial_retry_required": RUN_STATUS["retry_required"],
-           "aborted": RUN_STATUS["aborted"],
-           "abort_reason": RUN_STATUS["abort_reason"],
            "counts": counts, "points": rows}
     try:
         p = os.path.join(out_dir, "execution_ledger.json")
@@ -1836,13 +1769,6 @@ def write_execution_ledger(out_dir):
         if counts["predicted_ok_executed_failed"]:
             print("[ledger] FALSE POSITIVES mean the pre-check certified a path "
                   "the executor does not take (see precheck_path).")
-        if RUN_STATUS["retry_required"]:
-            print(f"[ledger] !! {RUN_STATUS['initial_tag']} needed "
-                  f"{RUN_STATUS['retries_used']} retry(ies). The data is good, "
-                  f"but this run met an INTERMITTENT fault — see "
-                  f"initial_retry_required / attempts.")
-        if RUN_STATUS["aborted"]:
-            print(f"[ledger] !! RUN ABORTED: {RUN_STATUS['abort_reason']}")
     except Exception as e:
         print(f"[ledger] write FAILED: {e}")
     return doc
@@ -2773,32 +2699,13 @@ try:
             print(f"[reach] {len(_bad)} unreachable, but GRASP_REACH_SKIP=0 -> "
                   f"attempting anyway.")
 
-    # The FIRST entry of GRID_POINTS is the pad pose the GUI designed as the
-    # initial contact. Everything downstream is anchored to it.
-    _INIT_IDX = GRID_POINTS[0]["index"] if GRID_POINTS else None
-    RUN_STATUS["initial_tag"] = (f"pt{_INIT_IDX:02d}"
-                                 if _INIT_IDX is not None else None)
-    if _INIT_IDX is not None:
-        print(f"[cfg] initial point = {RUN_STATUS['initial_tag']}  "
-              f"(retries={INITIAL_RETRIES}, "
-              f"abort_if_lost={int(ABORT_ON_INITIAL)})")
-
     for _i, gp in enumerate(GRID_POINTS):
         tag = f"pt{gp['index']:02d}"
-        _is_initial = (gp["index"] == _INIT_IDX)
         gw  = np.array(gp["world"])
         # reachability pre-check said no -> skip (already logged in the report)
         if REACH_SKIP and (gp["index"] in _reach) and not _reach[gp["index"]]:
             print(f"\n========== {tag}  SKIPPED (unreachable — see "
                   f"reachability_report.json) ==========")
-            if _is_initial and ABORT_ON_INITIAL:
-                RUN_STATUS["aborted"] = True
-                RUN_STATUS["abort_reason"] = (
-                    f"{tag} is the designed initial point and the pre-check "
-                    f"declared it unreachable; the remaining points cannot "
-                    f"form a training pair without it")
-                print(f"\n!!!!! RUN ABORTED — {RUN_STATUS['abort_reason']}")
-                break
             _prev_ok = False          # next point must re-approach from wherever we are
             continue
         # first point: approach from home the old way. after a good grasp: go
@@ -2811,51 +2718,11 @@ try:
         ok = grasp_one_point(gw, tag, row_marks, pose_hist,
                              dy_m=gp["dy_mm"]/1000.0, dz_m=gp["dz_mm"]/1000.0,
                              direct=_direct, retreat=_retreat)
-
-        # ---- the initial point gets a second chance, and only it -----------
-        # cuRobo's plan_single already re-seeds internally (max_attempts=5), so
-        # calling it again is a genuinely fresh solve rather than a repeat of
-        # the same computation. No pose_history entry and no per-point CSV is
-        # written by a failed attempt (all three failure exits sit before
-        # pose_hist.append), so the retry starts clean — apart from raw tactile
-        # frames, which _discard_pending_tactile drops.
-        if (not ok) and _is_initial and INITIAL_RETRIES > 0:
-            for _att in range(1, INITIAL_RETRIES + 1):
-                print(f"\n[{tag}] !! the DESIGNED INITIAL point failed at stage "
-                      f"'{EXEC_LEDGER.get(gp['index'], {}).get('stage')}'. "
-                      f"Retry {_att} of {INITIAL_RETRIES} ...")
-                _progress(f"{tag} RETRY {_att}/{INITIAL_RETRIES}")
-                _discard_pending_tactile(row_marks)
-                ok = grasp_one_point(gw, tag, row_marks, pose_hist,
-                                     dy_m=gp["dy_mm"]/1000.0,
-                                     dz_m=gp["dz_mm"]/1000.0,
-                                     direct=False, retreat=_retreat)
-                RUN_STATUS["retries_used"] = _att
-                if ok:
-                    RUN_STATUS["retry_required"] = True
-                    print(f"[{tag}] retry {_att} SUCCEEDED — collection "
-                          f"continues, and this run is flagged as having "
-                          f"needed a retry.")
-                    break
-
         _prev_ok = bool(ok)
         if ok:
             n_ok += 1
         else:
             print(f"[{tag}] skipped (motion failed).")
-            if _is_initial and ABORT_ON_INITIAL:
-                RUN_STATUS["aborted"] = True
-                RUN_STATUS["abort_reason"] = (
-                    f"{tag} is the designed initial point and it failed at "
-                    f"stage '{EXEC_LEDGER.get(gp['index'], {}).get('stage')}' "
-                    f"after {RUN_STATUS['retries_used']} retry(ies); without "
-                    f"it the remaining {_n_pts - 1} points cannot form a "
-                    f"training pair")
-                print(f"\n!!!!! RUN ABORTED — {RUN_STATUS['abort_reason']}")
-                print("!!!!! nothing further is collected. "
-                      "execution_ledger.json records every attempt; set "
-                      "GRASP_ABORT_ON_INITIAL=0 to collect anyway.")
-                break
 
     # save the pose history (real reached poses) + copy the config into the run folder
     import json as _json, shutil as _sh
@@ -2880,12 +2747,7 @@ try:
             print(f"[cfg] gui_preview.png copied into the run folder")
     except Exception:
         pass
-    if RUN_STATUS["aborted"]:
-        print(f"\n[cfg] ABORTED after {n_ok}/{len(GRID_POINTS)} grasps. "
-              f"Data in {OUTPUT_DIR}")
-        print(f"[cfg] reason: {RUN_STATUS['abort_reason']}")
-    else:
-        print(f"\n[cfg] DONE. {n_ok}/{len(GRID_POINTS)} grasps OK. Data in {OUTPUT_DIR}")
+    print(f"\n[cfg] DONE. {n_ok}/{len(GRID_POINTS)} grasps OK. Data in {OUTPUT_DIR}")
     print(f"[cfg] pose_history.json written ({len(pose_hist)} poses).")
 
     # ---- CALIBRATE mode: store the MEASURED live-pad offset ----------------

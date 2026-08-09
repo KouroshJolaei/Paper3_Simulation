@@ -245,36 +245,6 @@ INITIAL_GRASP = os.environ.get("STITCH_INITIAL_GRASP", "pt00")
 # export anyway — the substitution is then recorded in meta as
 # initial_status_<sensor> rather than hidden.
 ALLOW_INITIAL_FALLBACK = os.environ.get("STITCH_ALLOW_FALLBACK", "0") == "1"
-
-# ---- THE TRAINING PAIR HAS ONE FIXED CANVAS (2026-08-09) -------------------
-# build_canvas cuts its canvas to fit whatever the sweep happened to cover, in
-# world Y/Z. That is right for the FIGURES — they are pictures of a particular
-# run — and wrong for the training pair, which has to be one tensor shape:
-# four runs so far gave 74x74, 87x48, 99x99 and 116x116, none of which can be
-# batched with any other.
-#
-# So the pair gets its own canvas, pinned on three choices:
-#
-#   CELL 1.0 mm      still ~5x finer than the 5.5 x 5.29 mm taxel pitch, so
-#                    nothing real is lost; it only sets how finely a rotated
-#                    footprint's edge can be traced.
-#   SIZE 96 x 96 mm  the pad (22 x 37) plus ~30 mm of margin all round, which
-#                    lands on Paper 2's 30 mm haptic safe zone — the distance
-#                    at which extrapolated contact was measured to stop
-#                    tracking reality. The canvas extent IS the model's
-#                    prediction extent, so this is a claim, not a container.
-#   PAD FRAME        axes along the pad's own edges, centred on the designed
-#                    initial grasp. The model's output must arrive in the
-#                    frame the regrasp is commanded in (Paper 2's CDT maps
-#                    dx, dy onto tool0.Y / tool0.Z). A world-aligned canvas
-#                    would return the answer in a frame that depends on how
-#                    the pad happened to be rolled, and the caller would have
-#                    to un-rotate by an angle the model was never given.
-#
-# The FIGURES are untouched: they keep the world-aligned, fit-to-sweep canvas.
-PAIR_RES_MM = float(os.environ.get("STITCH_PAIR_RES_MM", "1.0"))
-PAIR_SIZE_MM = float(os.environ.get("STITCH_PAIR_SIZE_MM", "96.0"))
-PAIR_PAD_FRAME = os.environ.get("STITCH_PAIR_PAD_FRAME", "1") == "1"
                                    #        (flipped to world Z-up), easy to verify.
                                    # ON  -> remove the sensor's fixed background
                                    #        (better for multi-grasp training data).
@@ -728,58 +698,8 @@ def _composite_extended(res, which=None, init=None):
     return composite, (float(oy), float(oz)), key, ext_mm
 
 
-def _rot2(vy, vz, deg):
-    """Rotate a (Y, Z) vector by deg in the Y-Z plane."""
-    c, s = np.cos(np.radians(deg)), np.sin(np.radians(deg))
-    return (float(vy) * c - float(vz) * s, float(vy) * s + float(vz) * c)
-
-
-def to_pad_frame(grasps, bases, anchor_key):
-    """Re-express a run in the ANCHOR pad's own frame.
-
-    Rather than rotating the canvas — which would make the cell-centre axes
-    2-D and break the fast separable splat — this rotates the DATA the other
-    way: every pad centre turns about the anchor's centre by -roll, and every
-    basis turns by -roll too. Painting the result on an ordinary axis-aligned
-    grid then produces exactly the pad-frame canvas, and for the usual case
-    where every pad carries the same roll the rotated bases come out FLAT, so
-    the splat takes its fast path and the anchor's imprint lands upright.
-
-    Returns (grasps', bases', roll_deg_removed).
-    """
-    keys = [g[0] for g in grasps]
-    if anchor_key not in keys:
-        raise RuntimeError(
-            f"to_pad_frame: anchor {anchor_key!r} not among {len(keys)} grasps")
-    a_oy, a_oz = grasps[keys.index(anchor_key)][1]
-    th = pad_roll_deg(bases.get(anchor_key))
-    if abs(th) < ROLL_DEADBAND_DEG:
-        return list(grasps), dict(bases), 0.0
-    g2 = []
-    for key, (oy, oz), m in grasps:
-        dy, dz = _rot2(oy - a_oy, oz - a_oz, -th)
-        g2.append((key, (a_oy + dy, a_oz + dz), m))
-    b2 = {}
-    for key, (a, u) in bases.items():
-        b2[key] = (np.array(_rot2(a[0], a[1], -th)),
-                   np.array(_rot2(u[0], u[1], -th)))
-    return g2, b2, float(th)
-
-
-def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True,
-                 frame="world", fixed_size_mm=None, anchor_key=None):
+def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True):
     """Stitch all grasps of one sensor onto a mm canvas.
-
-    frame="world"        canvas axes are world Y/Z, extent cut to fit the
-                         sweep. The figures use this and are unchanged.
-    frame="pad"          canvas axes follow the ANCHOR pad's own edges and
-                         the canvas is centred on it. With fixed_size_mm the
-                         extent is pinned, so every run yields one tensor
-                         shape regardless of roll, step or grid size.
-    fixed_size_mm        square canvas of this side length, mm. A run whose
-                         data would not fit raises rather than being cropped.
-    anchor_key           which grasp is the centre; defaults to INITIAL_GRASP.
-
     Returns a dict with the canvas, coverage count, extent, the per-grasp
     list, the center-grasp index/key, an overlap-disagreement score, and a
     paint(indices) helper re-rendering any subset on the SAME grid."""
@@ -848,18 +768,6 @@ def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True,
         print(f"[stitch {sensor}] {len(grasps)} grasps kept, offsets from {src}")
 
     tax = _taxel_centers(cal)
-    _bases0 = load_pad_bases(run_dir)
-
-    # ---- PAD FRAME: rotate the DATA, not the canvas (see to_pad_frame) -----
-    frame_roll = 0.0
-    _anchor = anchor_key or INITIAL_GRASP
-    if frame == "pad":
-        grasps, _bases0, frame_roll = to_pad_frame(grasps, _bases0, _anchor)
-        if verbose and abs(frame_roll) > ROLL_DEADBAND_DEG:
-            print(f"[stitch {sensor}] canvas in the PAD frame: run rotated by "
-                  f"{-frame_roll:+.2f} deg about {_anchor}, so its imprint "
-                  f"lands upright and the axes are the pad's own")
-
     ys = [g[1][0] for g in grasps]
     zs = [g[1][1] for g in grasps]
     cy, cz = float(np.mean(ys)), float(np.mean(zs))          # canvas center
@@ -875,34 +783,13 @@ def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True,
     # A ROLLED pad needs a bigger canvas than a flat one (see
     # pad_half_extents). Flat runs are untouched: at 0 deg this reduces
     # exactly to PAD_W / PAD_H.
+    _bases0 = load_pad_bases(run_dir)
     _fy, _fz = PAD_W / 2.0, PAD_H / 2.0
     for _b in _bases0.values():
         _hy, _hz = pad_half_extents(_b)
         _fy, _fz = max(_fy, _hy), max(_fz, _hz)
     half_y = (max(ys) - min(ys)) / 2.0 + _fy + MARGIN
     half_z = (max(zs) - min(zs)) / 2.0 + _fz + MARGIN
-
-    # ---- FIXED EXTENT: one tensor shape, or a hard error ------------------
-    # Silently cropping would hand the trainer a target with its edges cut off
-    # and nothing in the file to say so, which is the same class of fault as
-    # the initial-grasp substitution. So this raises instead.
-    if fixed_size_mm:
-        need_y, need_z = 2 * half_y, 2 * half_z
-        if need_y > fixed_size_mm + 1e-6 or need_z > fixed_size_mm + 1e-6:
-            raise RuntimeError(
-                f"this run needs {need_y:.1f} x {need_z:.1f} mm but the pair "
-                f"canvas is fixed at {fixed_size_mm:.1f} mm square. Reduce the "
-                f"grid (a centred grid spans PAD + 2*n*step: "
-                f"{PAD_W:.0f}+2*nx*step across, {PAD_H:.0f}+2*ny*step along), "
-                f"or raise STITCH_PAIR_SIZE_MM — but then every earlier pair "
-                f"has to be re-exported at the new size.")
-        half_y = half_z = float(fixed_size_mm) / 2.0
-        if frame == "pad":                 # centre on the anchor, not the mean
-            _ak = [g[0] for g in grasps].index(_anchor) \
-                if _anchor in [g[0] for g in grasps] else None
-            if _ak is not None:
-                cy, cz = grasps[_ak][1]
-
     ny = int(np.ceil(2 * half_y / res_mm))
     nz = int(np.ceil(2 * half_z / res_mm))
     y0, z0 = cy - half_y, cz - half_z                        # origin (mm)
@@ -988,8 +875,6 @@ def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True,
 
     return {"canvas": canvas, "count": cnt,
             "extent": (y0, y0 + ny * res_mm, z0, z0 + nz * res_mm),
-            "frame": frame, "frame_roll_deg": frame_roll,
-            "anchor_key": (_anchor if frame == "pad" else None),
             "grasps": grasps, "center_index": center_i,
             "center_key": grasps[center_i][0],
             "gui_frame": gui_frame,
@@ -1386,16 +1271,13 @@ def _stitch_run_body(run_dir, res_mm=1.0):
     return made
 
 
-def export_pair(run_dir, res_mm=None):
-    """Write Stitched/training_pair.npz on the PINNED pair canvas.
+def export_pair(run_dir, res_mm=1.0):
+    """Write Stitched/training_pair.npz:
+    INPUT = the INITIAL grasp alone on the canvas, TARGET = full stitched
+    canvas (+ masks, per sensor), plus that grasp's raw temporal snapshots
+    (4,7,4) per sensor when temporal_snapshots.json exists.
 
-    INPUT = the INITIAL grasp alone, TARGET = the full stitch, both on a
-    canvas of PAIR_RES_MM cells, PAIR_SIZE_MM square, in the initial pad's own
-    frame and centred on it — so every run of every roll, step and grid size
-    exports the identical tensor shape. res_mm overrides PAIR_RES_MM only if
-    you pass it; the default is the pinned value, NOT the figures' 0.75.
-
-    THREE THINGS CHANGED, all visible in an old npz.
+    TWO THINGS CHANGED 2026-08-08, both visible in an old npz.
 
     1. The INPUT used to be painted from res["center_index"] — the grasp
        nearest the sweep CENTROID — while initial_/frame_rect_/frame_poly_/
@@ -1406,20 +1288,12 @@ def export_pair(run_dir, res_mm=None):
 
     2. A run whose DESIGNED initial grasp never executed no longer produces a
        pair at all. Set STITCH_ALLOW_FALLBACK=1 to export anyway; the
-       substitution is then recorded in initial_status_<sensor>.
-
-    3. The canvas is pinned (2026-08-09). Runs exported before this are
-       74x74, 87x48, 99x99 and 116x116 world-aligned cells and cannot be
-       batched with each other or with anything written from now on."""
-    res_mm = float(PAIR_RES_MM if res_mm is None else res_mm)
-    _frame = "pad" if PAIR_PAD_FRAME else "world"
+       substitution is then recorded in initial_status_<sensor>."""
     out = {}
-    meta = {"run_dir": os.path.abspath(run_dir), "res_mm": res_mm,
-            "canvas_frame": _frame, "canvas_size_mm": PAIR_SIZE_MM}
+    meta = {"run_dir": os.path.abspath(run_dir), "res_mm": res_mm}
     refused = []
     for sensor in ("s1", "s2"):
-        res = build_canvas(run_dir, sensor, res_mm,
-                           frame=_frame, fixed_size_mm=PAIR_SIZE_MM)
+        res = build_canvas(run_dir, sensor, res_mm)
         init = resolve_initial(res)
         if init["status"] == "fallback":
             print(f"[pair {sensor}] !! {init['note']}")
@@ -1556,9 +1430,6 @@ if __name__ == "__main__":
     if mode == "calibrate":
         calibrate(rd, rr)
     elif stitch_run(rd, rr):
-        # NOT export_pair(rd, rr): rr is the FIGURE resolution. The pair has
-        # its own pinned canvas (PAIR_RES_MM / PAIR_SIZE_MM) and must not
-        # inherit whatever the figures were drawn at.
-        export_pair(rd)
+        export_pair(rd, rr)
     else:
         print(f"nothing stitched in {rd}")

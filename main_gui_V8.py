@@ -1985,11 +1985,11 @@ class CockpitGUI:
                     "stitching.py not found (expected in viz/).")
                 return
             run = self._stitch_target_dir()
-            # The res box drives the FIGURES. The training pair has its own
-            # pinned canvas (1.0 mm, 96 mm square, pad frame) so every run
-            # exports one tensor shape — passing the box value here would
-            # undo that, so it is deliberately not passed.
-            npz = mod.export_pair(run)
+            try:
+                res = float(self.vars["stitch_res"].get())
+            except Exception:
+                res = 1.0
+            npz = mod.export_pair(run, res)
 
             # export_pair returns None when it REFUSES — the run's designed
             # initial grasp was never collected, so the pair would be built on
