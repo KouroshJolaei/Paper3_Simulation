@@ -58,91 +58,6 @@ except Exception:                                    # standalone fallback
 
 MIRROR_S2 = True     # show s2 mirrored L-R (the two pads face each other)
 
-# ---------------------------------------------------- expected patch ------
-# A measured 7x4 on its own cannot say whether a round blob is round because
-# the CONTACT is round or because the SENSOR made it round. So draw, beside
-# it, the 7x4 a perfect sensor would report for this same pad pose on this
-# same object — blob_axis.expected_patch_map, the identical function the blob
-# report uses, so the two cannot disagree.
-SHOW_EXPECTED_PANEL = True
-
-# Band width. blob_axis.BAND_WIDTH_MM still defaults to 8.0, which is right
-# for a thin rod and wrong for a fat one, and passing it silently is how a
-# whole series ends up incomparable. So derive it from the object instead:
-# a rod of diameter D indented by INDENT_MM contacts over a band of
-#     2 * sqrt(INDENT * (D - INDENT))
-# which gives 15.05 mm at D=26 -- matching the 15.0 mm fitted from a real
-# upright run -- and 8.5 mm at D=10. The number used is printed on the panel.
-INDENT_MM = 2.4
-BAND_WIDTH_MM = None      # None = derive from the rod's diameter (above)
-
-# The pad's OUTER TIP -- the free end of the finger, furthest from the palm.
-# Marked on every panel because a contact dying at that edge is geometry (the
-# sensor ran out of pad), not a sensor fault, and the two look identical in a
-# bare 7x4. Row 0 of the array is the physical BOTTOM of the pad and displays
-# use origin="lower", so the tip is the bottom edge of each heatmap.
-SHOW_PAD_TIP = True
-TIP_COLOR = "#7b2fbe"
-
-
-def _band_width_mm(scene):
-    """Contact-band width in mm for this object, or the blob_axis default."""
-    if BAND_WIDTH_MM is not None:
-        return float(BAND_WIDTH_MM), "set"
-    try:
-        d = float(scene["d"])
-        if d > 2 * INDENT_MM:
-            return (2.0 * float(np.sqrt(INDENT_MM * (d - INDENT_MM))),
-                    f"from \u00d8{d:.0f}")
-    except Exception:
-        pass
-    try:
-        import blob_axis as BA
-        return float(BA.BAND_WIDTH_MM), "blob_axis default"
-    except Exception:
-        return 8.0, "fallback"
-
-
-def _tip_edge_local(oy, oz, basis):
-    """The pad's tip edge, computed HERE.
-
-    This used to call stitching._draw_pad_tip with arrow_mm/lw and unpack a
-    return value, which meant an older stitching.py raised TypeError and the
-    tip vanished from the pose panel while every other panel still had it —
-    a version mismatch that looked exactly like a missing feature. Nothing in
-    this calculation needs the stitcher, so it no longer asks: PAD_W, PAD_H
-    and the measured basis are all it takes.
-
-    Returns ((Y0, Y1), (Z0, Z1), (uy, uz)) — the two corners of the short edge
-    furthest from the palm, and the outward direction.
-    """
-    try:
-        import stitching as ST
-        PW, PH = float(ST.PAD_W), float(ST.PAD_H)
-        flat = ST.is_flat(basis)
-        a, u = (ST.FLAT_BASIS if flat else
-                (np.asarray(basis[0], float), np.asarray(basis[1], float)))
-    except Exception:                       # last-ditch: upright 22 x 37
-        PW, PH = 22.0, 37.0
-        a, u = np.array([1.0, 0.0]), np.array([0.0, 1.0])
-    hw, hh = PW / 2.0, PH / 2.0
-    Y = (oy - hw * a[0] - hh * u[0], oy + hw * a[0] - hh * u[0])
-    Z = (oz - hw * a[1] - hh * u[1], oz + hw * a[1] - hh * u[1])
-    return Y, Z, (-u[0], -u[1])
-
-
-def _mark_tip(ax):
-    """Thick bar along the bottom edge of a 7x4 heatmap = the finger's tip."""
-    if not SHOW_PAD_TIP:
-        return
-    ax.plot([-0.5, N_COLS_DISP - 0.5], [-0.5, -0.5], "-", color=TIP_COLOR,
-            lw=5.0, solid_capstyle="butt", clip_on=False, zorder=6)
-    ax.text(N_COLS_DISP / 2.0 - 0.5, -0.95, "pad tip", ha="center", va="top",
-            fontsize=6.5, color=TIP_COLOR)
-
-
-N_COLS_DISP = 4
-
 # ---------------------------------------------------------- pose panel ----
 # A heatmap on its own does not say WHERE on the object it came from, which
 # on a 35-point grid means cross-referencing pose_history by hand for every
@@ -261,33 +176,6 @@ def _draw_pose_panel(ax, tag, lay):
         mz = (max(zs) - min(zs)) * 0.05 + 3.0
         ax.set_xlim(min(ys) - my, max(ys) + my)
         ax.set_ylim(min(zs) - mz, max(zs) + mz)
-
-    # TIP LAST, and sized to the view: this panel spans a whole 140 mm rod,
-    # not the ~90 mm of the stitched map, so a fixed 5 mm arrow is drawn but
-    # invisible. Everything here is computed locally — no stitching version
-    # can take the marker away again.
-    if SHOW_PAD_TIP and key in offs and zs:
-        try:
-            _span = max(max(zs) - min(zs), max(ys) - min(ys), 1.0)
-            oy, oz = offs[key]
-            (tY0, tY1), (tZ0, tZ1), (uy, uz) = _tip_edge_local(
-                oy, oz, bases.get(key))
-            ax.plot([tY0, tY1], [tZ0, tZ1], "-", color=TIP_COLOR, lw=5.5,
-                    solid_capstyle="butt", zorder=11)
-            mtY, mtZ = (tY0 + tY1) / 2.0, (tZ0 + tZ1) / 2.0
-            _ar = 0.09 * _span
-            ax.annotate("", xy=(mtY + _ar * uy, mtZ + _ar * uz),
-                        xytext=(mtY, mtZ),
-                        arrowprops=dict(arrowstyle="-|>", color=TIP_COLOR,
-                                        lw=1.8),
-                        zorder=11)
-            ax.text(mtY + 0.15 * _span * uy, mtZ + 0.15 * _span * uz,
-                    "pad tip", color=TIP_COLOR, fontsize=7,
-                    ha="center", va="center", zorder=12,
-                    bbox=dict(boxstyle="round,pad=0.15", fc="white",
-                              ec=TIP_COLOR, lw=0.5, alpha=0.85))
-        except Exception as e:
-            print(f"[maps] pad tip not drawn on the pose panel ({e})")
     ax.set_aspect("equal", adjustable="box")
     ax.tick_params(labelsize=7)
     ax.set_xlabel("world Y (mm)", fontsize=8)
@@ -374,34 +262,6 @@ def plot_run(run_dir):
                 panels.append((name, np.zeros((7, 4)), 0, 0.0, False))
 
         panel_max = max(float(p[1].max()) for p in panels)
-
-        # ---- what a PERFECT sensor would report at this same pad pose -----
-        exp_map, exp_txt = None, ""
-        if SHOW_EXPECTED_PANEL and lay and lay.get("scene"):
-            try:
-                import stitching as ST
-                import blob_axis as BA
-                _k = tag.split("_")[-1] if "_" in tag else tag
-                if _k in lay["offs"]:
-                    _bw, _src = _band_width_mm(lay["scene"])
-                    exp_map = BA.expected_patch_map(
-                        lay["offs"][_k], lay["bases"].get(_k), lay["scene"],
-                        band_width_mm=_bw, cal=ST.CAL["s1"])
-                    _mi = BA.blob_axis(exp_map)
-                    _me = BA.blob_axis(panels[0][1])
-                    exp_txt = (f"band {_bw:.1f} mm ({_src})\n"
-                               f"expected axis "
-                               + (f"{_mi['angle_from_vertical_deg']:+.1f}\u00b0 "
-                                  f"elong {_mi['elongation']:.2f}"
-                                  if _mi.get("ok") else "n/a")
-                               + "   |   s1 measured "
-                               + (f"{_me['angle_from_vertical_deg']:+.1f}\u00b0 "
-                                  f"elong {_me['elongation']:.2f}"
-                                  if _me.get("ok") else "n/a"))
-            except Exception as e:
-                print(f"[maps] expected panel unavailable for {tag} ({e})")
-                exp_map = None
-
         if _resolve_vmax is not None:
             vmax, scale_lbl = _resolve_vmax(panel_max, run_peak)
         else:
@@ -409,11 +269,10 @@ def plot_run(run_dir):
         if vmax <= 0:
             vmax = 1.0
 
-        # Columns: s1 | s2 | [expected] | [pose]. The two measured maps keep
-        # their original width so nothing already readable gets smaller.
-        n_extra = (1 if exp_map is not None else 0) + (1 if lay else 0)
-        ncol = 2 + n_extra
-        fig = Figure(figsize=(7.6 + 3.8 * n_extra, 4.0))
+        # Third column only when the run can actually place the grasp. The
+        # heatmaps keep their original width so the two maps do not shrink.
+        ncol = 3 if lay else 2
+        fig = Figure(figsize=(11.4 if lay else 7.6, 4.0))
         FigureCanvasAgg(fig)
         axes = [fig.add_subplot(1, ncol, 1), fig.add_subplot(1, ncol, 2)]
         im = None
@@ -432,39 +291,15 @@ def plot_run(run_dir):
                    if ok else f"{name} — FILE MISSING")
             ax.set_title(ttl, fontsize=9)
             ax.set_xticks([]); ax.set_yticks([])
-            # MIRROR_S2 flips columns, never rows, so the tip stays at the
-            # bottom on both panels.
-            _mark_tip(ax)
         cb = fig.colorbar(im, ax=axes, shrink=0.85)
         cb.set_label(f"pressure (a.u.) — {scale_lbl}", fontsize=8)
 
-        if exp_map is not None:
-            axe = fig.add_subplot(1, ncol, 3)
-            # OWN colour scale, deliberately: the expected patch is in
-            # arbitrary units normalised to 1000, so sharing the measured
-            # ceiling would say something false about magnitude. What is
-            # comparable between the panels is SHAPE, not brightness.
-            axe.imshow(exp_map, cmap="jet", aspect="auto", origin="lower",
-                       vmin=0.0, vmax=float(exp_map.max()) or 1.0)
-            axe.set_xticks([]); axe.set_yticks([])
-            axe.set_title("EXPECTED — perfect sensor, same pose\n"
-                          "(shape comparable, brightness NOT)", fontsize=9)
-            _mark_tip(axe)
-            if exp_txt:
-                axe.text(0.5, -0.14, exp_txt, transform=axe.transAxes,
-                         ha="center", va="top", fontsize=7, color="#333")
-
         if lay:
-            ax3 = fig.add_subplot(1, ncol, ncol)
+            ax3 = fig.add_subplot(1, 3, 3)
             try:
                 _draw_pose_panel(ax3, tag, lay)
                 head, note = _pose_title(tag, lay)
-                # WHOSE pose? Neither s1's nor s2's alone: the position comes
-                # from pose_history's FK-derived pad centre, and the two pads
-                # differ only in X, which this Y-Z view does not show. So one
-                # panel is correct for both.
-                ax3.set_title(head + "\n(same for s1 and s2: they differ only "
-                                     "in X)", fontsize=8)
+                ax3.set_title(head, fontsize=8)
                 if note:
                     ax3.text(0.5, 0.985, note, transform=ax3.transAxes,
                              ha="center", va="top", fontsize=7.5,

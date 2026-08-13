@@ -8,7 +8,7 @@
     "tilt_deg": 0.0,
     "tilt_axis": "X",
     "shape": "cylinder",
-    "diameter_mm": 52.0,
+    "diameter_mm": 45.0,
     "length_mm": 140.0
   },
   "pad": {

@@ -766,41 +766,6 @@ def to_pad_frame(grasps, bases, anchor_key):
     return g2, b2, float(th)
 
 
-def pad_tip_edge(oy, oz, basis=None):
-    """The pad's OUTER TIP edge — the free end of the finger.
-
-    Returns ((Y0, Y1), (Z0, Z1)), the two corners of the short edge furthest
-    from the palm, plus the outward direction as a third element.
-
-    WHICH EDGE, AND HOW WE KNOW. The palm sits ABOVE the pad and the fingers
-    hang down from it: pad_truth_probe.json measures
-    measured_palm_above_pad_mm = 146.4, and the GUI draws the palm line above
-    the pad for the same reason. So the tip is the pad's -u edge, where u is
-    the pad's own long axis. At roll the edge turns with the pad, which is why
-    this is derived from the basis rather than being "the bottom two corners".
-
-    Why it is worth drawing: that edge is the part of the sensor that leaves
-    the object first, so contact dying there is geometry, not a sensor fault —
-    and it is the end that would strike anything below the grasp."""
-    a, u = (FLAT_BASIS if is_flat(basis)
-            else (np.asarray(basis[0], float), np.asarray(basis[1], float)))
-    hw, hh = PAD_W / 2.0, PAD_H / 2.0
-    Y = (oy - hw * a[0] - hh * u[0], oy + hw * a[0] - hh * u[0])
-    Z = (oz - hw * a[1] - hh * u[1], oz + hw * a[1] - hh * u[1])
-    return Y, Z, (-u[0], -u[1])
-
-
-def _draw_pad_tip(ax, oy, oz, basis, label=None, z=10):
-    """Mark the pad's tip edge: a thick bar plus a small outward arrow."""
-    (Y0, Y1), (Z0, Z1), (uy, uz) = pad_tip_edge(oy, oz, basis)
-    ax.plot([Y0, Y1], [Z0, Z1], "-", color="#7b2fbe", lw=4.0,
-            solid_capstyle="butt", zorder=z, label=label)
-    my, mz = (Y0 + Y1) / 2.0, (Z0 + Z1) / 2.0
-    ax.annotate("", xy=(my + 5.0 * uy, mz + 5.0 * uz), xytext=(my, mz),
-                arrowprops=dict(arrowstyle="-|>", color="#7b2fbe", lw=1.4),
-                zorder=z)
-
-
 def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True,
                  frame="world", fixed_size_mm=None, anchor_key=None):
     """Stitch all grasps of one sensor onto a mm canvas.
@@ -1301,13 +1266,8 @@ def _stitch_run_body(run_dir, res_mm=1.0):
             ax3 = fig.add_subplot(1, ncols, 3)
             clipped = np.ma.masked_where(~(gcnt>0), gcanvas)
             cmap = plt.cm.jet.copy(); cmap.set_bad(alpha=0.0)
-            # SAME colour scale as columns 1 and 4 (2026-08-11). This imshow
-            # had no vmin/vmax, so matplotlib autoscaled it to its own data —
-            # which made an identical pressure render as a different colour in
-            # column 3 than in column 1, and invited exactly the wrong
-            # comparison between panels of the same figure.
             ax3.imshow(clipped, cmap=cmap, origin="lower", extent=gext,
-                       aspect="equal", vmin=v_lo, vmax=v_hi)
+                       aspect="equal")
             if scene:
                 th = np.deg2rad(scene["tilt"]) if scene["axis"]=="X" else 0.0
                 cth, sth = np.cos(th), np.sin(th)
@@ -1322,26 +1282,6 @@ def _stitch_run_body(run_dir, res_mm=1.0):
                      "k--", lw=1.0, alpha=0.6, label="grid outer bound (pad centres)")
             ax3.scatter([p[0] for p in pts], [p[1] for p in pts],
                         s=3, color="k", alpha=0.35, zorder=5)
-            # THE INITIAL PAD FRAME (2026-08-11). Column 3 showed only pad
-            # CENTRES as dots, so the one pose the whole run is anchored to —
-            # and the one the GUI draws in purple on its preview — was
-            # invisible here. Same outline, same colour and same source as
-            # column 4, so the two panels cannot disagree about where pt00 sat.
-            try:
-                _ik = resolve_initial(res)["key"]
-                if _ik in gui["cmd"]:
-                    _iy, _iz = gui["cmd"][_ik][0], gui["cmd"][_ik][1]
-                    _IY, _IZ = pad_corners(_iy, _iz, gbase.get(_ik))
-                    ax3.plot(_IY, _IZ, "k-", lw=2.6, alpha=0.85, zorder=7)
-                    ax3.plot(_IY, _IZ, "w--", lw=1.4, zorder=8,
-                             label=f"initial pad frame ({_ik})")
-                    ax3.plot([_iy], [_iz], "o", mfc="w", mec="k", ms=4,
-                             mew=0.8, zorder=9)
-                    _draw_pad_tip(ax3, _iy, _iz, gbase.get(_ik),
-                                  label="pad tip (finger free end)")
-            except Exception as _ie:
-                print(f"[stitch {sensor}] note: initial pad frame not drawn "
-                      f"on column 3 ({_ie})")
             # Frame the whole object like the GUI (not just the grid): include
             # the full cylinder outline plus a margin, so nothing is cut off.
             xs = [gext[0], gext[1]]; ys_ = [gext[2], gext[3]]
@@ -1365,12 +1305,7 @@ def _stitch_run_body(run_dir, res_mm=1.0):
             ax3.set_aspect("equal")
             ax3.set_title("swept shape on object (GUI frame)", fontsize=10)
             ax3.set_xlabel("Y (mm)")
-            # Legend BELOW the axes, not on top of them: at "upper right" it
-            # sat over the swept region and hid the very cells the panel
-            # exists to show.
-            ax3.legend(fontsize=6, loc="upper center",
-                       bbox_to_anchor=(0.5, -0.13), ncol=2,
-                       frameon=True, borderaxespad=0.0)
+            ax3.legend(fontsize=6, loc="upper right")
         else:
             print("[stitch] NO overlay column: could not read commanded grid "
                   "from config (need gui_config with object + points).")
@@ -1395,8 +1330,6 @@ def _stitch_run_body(run_dir, res_mm=1.0):
                         else f"initial pad frame ({c_key}, roll {c_roll:+.1f} deg)"))
         ax4.scatter([c_oy], [c_oz], s=18, color="w",
                     edgecolor="k", linewidth=0.6, zorder=6)
-        _draw_pad_tip(ax4, c_oy, c_oz, c_basis,
-                      label="pad tip (finger free end)")
         # At roll, "up/down/left/right" are world directions measured from the
         # pad's BOUNDING BOX, not from its own edges — say so rather than let
         # the reader assume pad-frame numbers. Nothing is added when upright,
