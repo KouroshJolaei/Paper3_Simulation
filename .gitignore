@@ -17,3 +17,4 @@ Data/
 !Data/*.json
 __pycache__/
 *.pyc
+train/venv/
