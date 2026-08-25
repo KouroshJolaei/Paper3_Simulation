@@ -790,15 +790,23 @@ def pad_tip_edge(oy, oz, basis=None):
     return Y, Z, (-u[0], -u[1])
 
 
-def _draw_pad_tip(ax, oy, oz, basis, label=None, z=10):
-    """Mark the pad's tip edge: a thick bar plus a small outward arrow."""
+def _draw_pad_tip(ax, oy, oz, basis, label=None, z=10, arrow_mm=5.0, lw=4.0):
+    """Mark the pad's tip edge: a thick bar plus a small outward arrow.
+
+    arrow_mm and lw are exposed because the same marker is drawn on panels of
+    very different scale: on the stitched map the view is ~90 mm across and a
+    5 mm arrow reads clearly, while the heatmap pose panel spans a whole
+    140 mm rod and the identical marker all but vanishes."""
     (Y0, Y1), (Z0, Z1), (uy, uz) = pad_tip_edge(oy, oz, basis)
-    ax.plot([Y0, Y1], [Z0, Z1], "-", color="#7b2fbe", lw=4.0,
+    ax.plot([Y0, Y1], [Z0, Z1], "-", color="#7b2fbe", lw=lw,
             solid_capstyle="butt", zorder=z, label=label)
     my, mz = (Y0 + Y1) / 2.0, (Z0 + Z1) / 2.0
-    ax.annotate("", xy=(my + 5.0 * uy, mz + 5.0 * uz), xytext=(my, mz),
-                arrowprops=dict(arrowstyle="-|>", color="#7b2fbe", lw=1.4),
+    ax.annotate("", xy=(my + arrow_mm * uy, mz + arrow_mm * uz),
+                xytext=(my, mz),
+                arrowprops=dict(arrowstyle="-|>", color="#7b2fbe",
+                                lw=max(1.2, lw * 0.35)),
                 zorder=z)
+    return (my, mz), (uy, uz)
 
 
 def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True,
@@ -888,6 +896,20 @@ def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True,
     # ---- PAD FRAME: rotate the DATA, not the canvas (see to_pad_frame) -----
     frame_roll = 0.0
     _anchor = anchor_key or INITIAL_GRASP
+    # If the requested anchor is not in this run, fall back to the first
+    # grasp rather than raising. to_pad_frame used to raise here, which meant
+    # a run whose pt00 never executed died with a traceback out of
+    # export_pair instead of the clean "NO training_pair.npz written"
+    # refusal — the refusal exists precisely for that case and never got the
+    # chance to run. resolve_initial still sees the substitution downstream
+    # and export_pair still refuses; it just does so in words.
+    _keys = [g[0] for g in grasps]
+    if frame == "pad" and _anchor not in _keys and _keys:
+        if verbose:
+            print(f"[stitch {sensor}] anchor {_anchor!r} is not in this run "
+                  f"({len(_keys)} grasps); centring the canvas on {_keys[0]} "
+                  f"so the export can report the substitution properly")
+        _anchor = _keys[0]
     if frame == "pad":
         grasps, _bases0, frame_roll = to_pad_frame(grasps, _bases0, _anchor)
         if verbose and abs(frame_roll) > ROLL_DEADBAND_DEG:
@@ -1453,7 +1475,8 @@ def _stitch_run_body(run_dir, res_mm=1.0):
     return made
 
 
-def export_pair(run_dir, res_mm=None):
+def export_pair(run_dir, res_mm=None, anchor=None,
+                anchor_kind=None, out_path=None):
     """Write Stitched/training_pair.npz on the PINNED pair canvas.
 
     INPUT = the INITIAL grasp alone, TARGET = the full stitch, both on a
@@ -1483,11 +1506,15 @@ def export_pair(run_dir, res_mm=None):
     out = {}
     meta = {"run_dir": os.path.abspath(run_dir), "res_mm": res_mm,
             "canvas_frame": _frame, "canvas_size_mm": PAIR_SIZE_MM}
+    if anchor is not None:
+        meta["anchor"] = str(anchor)
+        meta["anchor_kind"] = str(anchor_kind or "?")
     refused = []
     for sensor in ("s1", "s2"):
         res = build_canvas(run_dir, sensor, res_mm,
-                           frame=_frame, fixed_size_mm=PAIR_SIZE_MM)
-        init = resolve_initial(res)
+                           frame=_frame, fixed_size_mm=PAIR_SIZE_MM,
+                           anchor_key=anchor)
+        init = resolve_initial(res, which=anchor)
         if init["status"] == "fallback":
             print(f"[pair {sensor}] !! {init['note']}")
             if not ALLOW_INITIAL_FALLBACK:
@@ -1554,12 +1581,101 @@ def export_pair(run_dir, res_mm=None):
               "STITCH_ALLOW_FALLBACK=1 to accept the substitution knowingly.")
         return None
 
-    out_dir = os.path.join(run_dir, "Stitched")
-    os.makedirs(out_dir, exist_ok=True)
-    npz = os.path.join(out_dir, "training_pair.npz")
+    npz = out_path or os.path.join(run_dir, "Stitched", "training_pair.npz")
+    os.makedirs(os.path.dirname(npz), exist_ok=True)
     np.savez_compressed(npz, meta=json.dumps(meta), **out)
     print(f"saved {npz}")
     return npz
+
+
+def anchor_kinds(run_dir, sensor="s1", res_mm=None, tol_mm=1.0):
+    """Classify every grasp as INTERIOR or EDGE of its own sweep.
+
+    An anchored pair re-centres the 96 mm canvas on the chosen grasp. For a
+    grasp in the middle of the sweep the box is filled with measured target on
+    every side. For one on the rim, half the box hangs over ground the robot
+    never visited, so that half of the target is blank -- not wrong, but a
+    different and easier question ("extend inward") than the centred one
+    ("extend outward in all directions").
+
+    INTERIOR means: at least one other grasp lies further out in EACH of the
+    four directions. On a 5x5 grid that is exactly the middle 3x3.
+
+    The test is done on pad-centre positions rather than on the mask, because
+    positions are exact while a mask is a rasterised approximation of them.
+    """
+    res = build_canvas(run_dir, sensor, res_mm or PAIR_RES_MM,
+                       frame="pad" if PAIR_PAD_FRAME else "world",
+                       fixed_size_mm=None, verbose=False)
+    g = [(k, o[0], o[1]) for k, o, _m in res["grasps"]]
+    out = {}
+    for k, y, z in g:
+        left = any(oy < y - tol_mm for _k, oy, _oz in g)
+        right = any(oy > y + tol_mm for _k, oy, _oz in g)
+        down = any(oz < z - tol_mm for _k, _oy, oz in g)
+        up = any(oz > z + tol_mm for _k, _oy, oz in g)
+        out[k] = ("interior" if (left and right and down and up) else "edge")
+    return out
+
+
+def export_anchor_pairs(run_dir, res_mm=None, include_edge=False,
+                        verbose=True):
+    """Write one pair per grasp into <run>/Stitched/pairs/.
+
+    WHY THIS IS FREE. The pairs are DERIVED, not collected: a run folder holds
+    the per-grasp tactile CSVs and pose_history, and training_pair.npz is only
+    one view of them. Re-centring on a different grasp costs no robot time and
+    needs no change to how data is gathered.
+
+    WHAT IT IS NOT. These are not independent samples. Every anchor from one
+    sweep shares an object, a pose and the same underlying measurements, so
+    this is closer to augmentation than to new data. dataset.split_by_run
+    keeps all of a run's anchors on one side of the train/val split, which is
+    what stops that from turning into a flattering validation score.
+
+    training_pair.npz is left exactly where it is -- untouched, still the
+    pt00 pair -- so every existing scan and every already-exported run stays
+    valid. The extra pairs live in a subfolder and can be included or ignored
+    with one flag at training time.
+    """
+    res_mm = float(PAIR_RES_MM if res_mm is None else res_mm)
+    kinds = anchor_kinds(run_dir, "s1", res_mm)
+    out_dir = os.path.join(run_dir, "Stitched", "pairs")
+    os.makedirs(out_dir, exist_ok=True)
+
+    made, skipped = [], []
+    order = sorted(kinds, key=lambda k: (0 if k == INITIAL_GRASP else 1, k))
+    for tag in order:
+        kind = kinds[tag]
+        if kind == "edge" and not include_edge:
+            skipped.append((tag, "edge (use include_edge=True)"))
+            continue
+        p = os.path.join(out_dir, f"pair_{tag}_{kind}.npz")
+        try:
+            got = export_pair(run_dir, res_mm=res_mm, anchor=tag,
+                              anchor_kind=kind, out_path=p)
+            if got:
+                made.append((tag, kind))
+            else:
+                skipped.append((tag, "export refused"))
+        except RuntimeError as e:
+            # A rim anchor can push the fixed canvas past the data. That is a
+            # real limit of that anchor, not a failure of the run, so it is
+            # recorded and the rest continue.
+            skipped.append((tag, str(e).split(".")[0][:80]))
+    if verbose:
+        n_i = sum(1 for _t, k in made if k == "interior")
+        n_e = len(made) - n_i
+        print(f"[anchors] {len(made)} pairs written to {out_dir}")
+        print(f"[anchors]   {n_i} interior, {n_e} edge "
+              f"(of {len(kinds)} grasps)")
+        if skipped:
+            print(f"[anchors] {len(skipped)} not written:")
+            for t, why in skipped[:6]:
+                print(f"[anchors]     {t}: {why}")
+            if len(skipped) > 6:
+                print(f"[anchors]     ... and {len(skipped)-6} more")
+    return made, skipped
 
 
 def calibrate(run_dir, res_mm=1.0):

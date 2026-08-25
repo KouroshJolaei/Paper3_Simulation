@@ -1281,7 +1281,7 @@ def plan_free_move(start_q, target_base, label):
           f"({last.status if last is not None else 'no result'})")
     return None
 
-def plan_stitched_z(start_q, dz, label):
+def plan_stitched_z(start_q, dz, label, contact_at="end"):
     metric = PoseCostMetric(hold_partial_pose=True,
         hold_vec_weight=mg.tensor_args.to_device(
             np.array(CASE13_WEIGHT, dtype=np.float32)))
@@ -1297,6 +1297,19 @@ def plan_stitched_z(start_q, dz, label):
     # stays an obstacle for the long approach and is released only inside
     # CONTACT_ZONE_M of the goal.
     #
+    # WHICH END IS THE CONTACT (2026-08-24). The zone above was written for a
+    # descent, where the goal IS the contact, so "distance to go" and
+    # "distance from contact" are the same number. The ASCENT reuses this
+    # function with the contact at the START, and reading the zone off the
+    # goal then releases the object at the top and holds it as an obstacle at
+    # the bottom -- where the gripper is still wrapped around the rod. cuRobo
+    # rejects that before planning: pt20 on run_20260824_151540 failed with
+    # "Start or End state in collision", and it only showed up now because
+    # GRASP_TOOL_COLLISION=1 finally puts the gripper in the model.
+    #
+    # contact_at="end" is the default, so all three descent callers are
+    # bit-identical. Only the ascent passes "start".
+    #
     # Travel direction: upright (or flag off) this is (0,0,-1) and
     # `cpos + (-step)*axis` is identical to the old `cpos[2] += step`, so
     # nothing changes for existing runs. Rolled with the flag on, it follows
@@ -1310,8 +1323,10 @@ def plan_stitched_z(start_q, dz, label):
     for i in range(N_STEPS):
         # distance still to go AFTER this step
         _left = _travel * (1.0 - float(i + 1) / N_STEPS)
-        set_object_collision(_left > CONTACT_ZONE_M,
-                             f"descent, {1000*_left:.0f} mm to go")
+        _from_contact = _left if contact_at == "end" else (_travel - _left)
+        set_object_collision(_from_contact > CONTACT_ZONE_M,
+                             f"{'descent' if contact_at == 'end' else 'ascent'}"
+                             f", {1000*_from_contact:.0f} mm from contact")
         cpos, cquat = fk(cur_q)
         tgt = cpos + (-step) * _axis
         s = JointState.from_position(
@@ -2711,7 +2726,10 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
         _progress(f"{tag} ascent start")
         print(f"[{tag}] ascent GRASP->UP ...")
         dz_up = float(np.linalg.norm(up_world - grasp_world))
-        traj_up2 = plan_stitched_z(q_grasp, dz_up, f"{tag}:UP")
+        # contact_at="start": we are LEAVING the object, so the contact zone
+        # is behind us, not ahead. See plan_stitched_z.
+        traj_up2 = plan_stitched_z(q_grasp, dz_up, f"{tag}:UP",
+                                   contact_at="start")
         if traj_up2 is not None:
             run_traj(traj_up2)
         _progress(f"{tag} ascent done")

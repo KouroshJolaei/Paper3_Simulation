@@ -1,0 +1,16 @@
+PAPER 3 — contact completion, training report
+finished   : 2026-08-18 18:21:18  (3.6 min)
+rig        : sim   pairs 12 from 6 runs
+split      : 8 train / 4 val, BY RUN (val: ['run_20260807_155246_obj0_pad75', 'run_20260808_152511_obj0_padm25'])
+model      : UNet base=32 depth=4, 7.77 M params
+epochs     : 200   best at 35 (loss 0.1530)
+input scale: 659.3
+
+MEASURED CELLS ONLY. ~60% of the canvas was never visited; those cells are 'nobody looked', not 'no contact', and are excluded from every number below.
+
+                    L1      SSIM     TC mm
+zero            0.3188     0.000         -
+copy input      0.2094     0.461         -
+model           0.1731     0.696      5.44
+
+VERDICT: BEATS copy

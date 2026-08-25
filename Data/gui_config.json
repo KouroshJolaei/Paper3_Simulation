@@ -8,30 +8,340 @@
     "tilt_deg": 0.0,
     "tilt_axis": "X",
     "shape": "cylinder",
-    "diameter_mm": 10.0,
+    "diameter_mm": 32.0,
     "length_mm": 140.0
   },
   "pad": {
     "base_offset_y_mm": 0.0,
-    "base_offset_z_mm": 35.0,
+    "base_offset_z_mm": 32.35,
     "x_fixed_centered": true,
-    "rotation_deg": 0.0,
+    "rotation_deg": 90.0,
     "rotation_axis": "y"
   },
   "grid": {
-    "nx": 1,
-    "ny": 1,
-    "step_mm": 8.0,
-    "centered": false,
+    "nx": 4,
+    "ny": 3,
+    "step_mm": 6.0,
+    "centered": true,
     "step_frame": "pad",
-    "step_roll_deg": 0.0,
-    "n_points": 1
+    "step_roll_deg": 90.0,
+    "n_points": 63
   },
   "points": [
     {
       "index": 0,
       "pad_offset_y_mm": 0.0,
-      "pad_offset_z_mm": 35.0
+      "pad_offset_z_mm": 32.35
+    },
+    {
+      "index": 1,
+      "pad_offset_y_mm": 24.0,
+      "pad_offset_z_mm": 14.350000000000001
+    },
+    {
+      "index": 2,
+      "pad_offset_y_mm": 18.0,
+      "pad_offset_z_mm": 14.350000000000001
+    },
+    {
+      "index": 3,
+      "pad_offset_y_mm": 11.999999999999998,
+      "pad_offset_z_mm": 14.350000000000001
+    },
+    {
+      "index": 4,
+      "pad_offset_y_mm": 5.999999999999999,
+      "pad_offset_z_mm": 14.350000000000001
+    },
+    {
+      "index": 5,
+      "pad_offset_y_mm": -1.102182119232618e-15,
+      "pad_offset_z_mm": 14.350000000000001
+    },
+    {
+      "index": 6,
+      "pad_offset_y_mm": -6.000000000000001,
+      "pad_offset_z_mm": 14.350000000000001
+    },
+    {
+      "index": 7,
+      "pad_offset_y_mm": -12.000000000000002,
+      "pad_offset_z_mm": 14.350000000000001
+    },
+    {
+      "index": 8,
+      "pad_offset_y_mm": -18.0,
+      "pad_offset_z_mm": 14.350000000000001
+    },
+    {
+      "index": 9,
+      "pad_offset_y_mm": -24.0,
+      "pad_offset_z_mm": 14.350000000000001
+    },
+    {
+      "index": 10,
+      "pad_offset_y_mm": -24.0,
+      "pad_offset_z_mm": 20.35
+    },
+    {
+      "index": 11,
+      "pad_offset_y_mm": -18.0,
+      "pad_offset_z_mm": 20.35
+    },
+    {
+      "index": 12,
+      "pad_offset_y_mm": -12.0,
+      "pad_offset_z_mm": 20.35
+    },
+    {
+      "index": 13,
+      "pad_offset_y_mm": -6.000000000000001,
+      "pad_offset_z_mm": 20.35
+    },
+    {
+      "index": 14,
+      "pad_offset_y_mm": -7.347880794884119e-16,
+      "pad_offset_z_mm": 20.35
+    },
+    {
+      "index": 15,
+      "pad_offset_y_mm": 5.999999999999999,
+      "pad_offset_z_mm": 20.35
+    },
+    {
+      "index": 16,
+      "pad_offset_y_mm": 12.0,
+      "pad_offset_z_mm": 20.35
+    },
+    {
+      "index": 17,
+      "pad_offset_y_mm": 18.0,
+      "pad_offset_z_mm": 20.35
+    },
+    {
+      "index": 18,
+      "pad_offset_y_mm": 24.0,
+      "pad_offset_z_mm": 20.35
+    },
+    {
+      "index": 19,
+      "pad_offset_y_mm": 24.0,
+      "pad_offset_z_mm": 26.35
+    },
+    {
+      "index": 20,
+      "pad_offset_y_mm": 18.0,
+      "pad_offset_z_mm": 26.35
+    },
+    {
+      "index": 21,
+      "pad_offset_y_mm": 12.0,
+      "pad_offset_z_mm": 26.35
+    },
+    {
+      "index": 22,
+      "pad_offset_y_mm": 6.0,
+      "pad_offset_z_mm": 26.35
+    },
+    {
+      "index": 23,
+      "pad_offset_y_mm": -3.6739403974420594e-16,
+      "pad_offset_z_mm": 26.35
+    },
+    {
+      "index": 24,
+      "pad_offset_y_mm": -6.0,
+      "pad_offset_z_mm": 26.35
+    },
+    {
+      "index": 25,
+      "pad_offset_y_mm": -12.0,
+      "pad_offset_z_mm": 26.35
+    },
+    {
+      "index": 26,
+      "pad_offset_y_mm": -18.0,
+      "pad_offset_z_mm": 26.35
+    },
+    {
+      "index": 27,
+      "pad_offset_y_mm": -24.0,
+      "pad_offset_z_mm": 26.35
+    },
+    {
+      "index": 28,
+      "pad_offset_y_mm": -24.0,
+      "pad_offset_z_mm": 32.35
+    },
+    {
+      "index": 29,
+      "pad_offset_y_mm": -18.0,
+      "pad_offset_z_mm": 32.35
+    },
+    {
+      "index": 30,
+      "pad_offset_y_mm": -12.0,
+      "pad_offset_z_mm": 32.35
+    },
+    {
+      "index": 31,
+      "pad_offset_y_mm": -6.0,
+      "pad_offset_z_mm": 32.35
+    },
+    {
+      "index": 32,
+      "pad_offset_y_mm": 6.0,
+      "pad_offset_z_mm": 32.35
+    },
+    {
+      "index": 33,
+      "pad_offset_y_mm": 12.0,
+      "pad_offset_z_mm": 32.35
+    },
+    {
+      "index": 34,
+      "pad_offset_y_mm": 18.0,
+      "pad_offset_z_mm": 32.35
+    },
+    {
+      "index": 35,
+      "pad_offset_y_mm": 24.0,
+      "pad_offset_z_mm": 32.35
+    },
+    {
+      "index": 36,
+      "pad_offset_y_mm": 24.0,
+      "pad_offset_z_mm": 38.35
+    },
+    {
+      "index": 37,
+      "pad_offset_y_mm": 18.0,
+      "pad_offset_z_mm": 38.35
+    },
+    {
+      "index": 38,
+      "pad_offset_y_mm": 12.0,
+      "pad_offset_z_mm": 38.35
+    },
+    {
+      "index": 39,
+      "pad_offset_y_mm": 6.0,
+      "pad_offset_z_mm": 38.35
+    },
+    {
+      "index": 40,
+      "pad_offset_y_mm": 3.6739403974420594e-16,
+      "pad_offset_z_mm": 38.35
+    },
+    {
+      "index": 41,
+      "pad_offset_y_mm": -6.0,
+      "pad_offset_z_mm": 38.35
+    },
+    {
+      "index": 42,
+      "pad_offset_y_mm": -12.0,
+      "pad_offset_z_mm": 38.35
+    },
+    {
+      "index": 43,
+      "pad_offset_y_mm": -18.0,
+      "pad_offset_z_mm": 38.35
+    },
+    {
+      "index": 44,
+      "pad_offset_y_mm": -24.0,
+      "pad_offset_z_mm": 38.35
+    },
+    {
+      "index": 45,
+      "pad_offset_y_mm": -24.0,
+      "pad_offset_z_mm": 44.35
+    },
+    {
+      "index": 46,
+      "pad_offset_y_mm": -18.0,
+      "pad_offset_z_mm": 44.35
+    },
+    {
+      "index": 47,
+      "pad_offset_y_mm": -12.0,
+      "pad_offset_z_mm": 44.35
+    },
+    {
+      "index": 48,
+      "pad_offset_y_mm": -5.999999999999999,
+      "pad_offset_z_mm": 44.35
+    },
+    {
+      "index": 49,
+      "pad_offset_y_mm": 7.347880794884119e-16,
+      "pad_offset_z_mm": 44.35
+    },
+    {
+      "index": 50,
+      "pad_offset_y_mm": 6.000000000000001,
+      "pad_offset_z_mm": 44.35
+    },
+    {
+      "index": 51,
+      "pad_offset_y_mm": 12.0,
+      "pad_offset_z_mm": 44.35
+    },
+    {
+      "index": 52,
+      "pad_offset_y_mm": 18.0,
+      "pad_offset_z_mm": 44.35
+    },
+    {
+      "index": 53,
+      "pad_offset_y_mm": 24.0,
+      "pad_offset_z_mm": 44.35
+    },
+    {
+      "index": 54,
+      "pad_offset_y_mm": 24.0,
+      "pad_offset_z_mm": 50.35
+    },
+    {
+      "index": 55,
+      "pad_offset_y_mm": 18.0,
+      "pad_offset_z_mm": 50.35
+    },
+    {
+      "index": 56,
+      "pad_offset_y_mm": 12.000000000000002,
+      "pad_offset_z_mm": 50.35
+    },
+    {
+      "index": 57,
+      "pad_offset_y_mm": 6.000000000000001,
+      "pad_offset_z_mm": 50.35
+    },
+    {
+      "index": 58,
+      "pad_offset_y_mm": 1.102182119232618e-15,
+      "pad_offset_z_mm": 50.35
+    },
+    {
+      "index": 59,
+      "pad_offset_y_mm": -5.999999999999999,
+      "pad_offset_z_mm": 50.35
+    },
+    {
+      "index": 60,
+      "pad_offset_y_mm": -11.999999999999998,
+      "pad_offset_z_mm": 50.35
+    },
+    {
+      "index": 61,
+      "pad_offset_y_mm": -18.0,
+      "pad_offset_z_mm": 50.35
+    },
+    {
+      "index": 62,
+      "pad_offset_y_mm": -24.0,
+      "pad_offset_z_mm": 50.35
     }
   ]
 }

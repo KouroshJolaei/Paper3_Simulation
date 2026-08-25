@@ -203,5 +203,169 @@
     "finger_joint_rad": 0.37739694118499756,
     "tactile_peak_sum": 14171.7,
     "measured_at": "20260810_195540"
+  },
+  "20.0": {
+    "diameter_mm": 20.0,
+    "method": "measured_live_pad",
+    "TOOL_OFFSET_Z": 0.15696,
+    "TOOL_OFFSET_Z_case_origin": 0.13486,
+    "pad_center_above_case_m": 0.0221,
+    "ee_to_grasp_center_offset_world_m": [
+      -6e-05,
+      -1e-05,
+      -0.13486
+    ],
+    "ee_to_pad_right_world_m": [
+      0.03094,
+      -0.01421,
+      -0.13487
+    ],
+    "ee_to_pad_left_world_m": [
+      -0.03106,
+      0.01419,
+      -0.13486
+    ],
+    "pad_right_closed_world_m": [
+      -0.23715,
+      0.18478,
+      1.10741
+    ],
+    "pad_left_closed_world_m": [
+      -0.29914,
+      0.21318,
+      1.10742
+    ],
+    "ee_world_m": [
+      -0.26808,
+      0.19899,
+      1.24228
+    ],
+    "close_rad": 0.613,
+    "finger_joint_rad": 0.6131366491317749,
+    "tactile_peak_sum": 15428.5,
+    "measured_at": "20260819_225534"
+  },
+  "32.0": {
+    "diameter_mm": 32.0,
+    "method": "measured_live_pad",
+    "TOOL_OFFSET_Z": 0.15599,
+    "TOOL_OFFSET_Z_case_origin": 0.13389,
+    "pad_center_above_case_m": 0.0221,
+    "ee_to_grasp_center_offset_world_m": [
+      -7e-05,
+      -0.0,
+      -0.13389
+    ],
+    "ee_to_pad_right_world_m": [
+      0.03731,
+      -0.0142,
+      -0.1339
+    ],
+    "ee_to_pad_left_world_m": [
+      -0.03744,
+      0.0142,
+      -0.13389
+    ],
+    "pad_right_closed_world_m": [
+      -0.23075,
+      0.18481,
+      1.10842
+    ],
+    "pad_left_closed_world_m": [
+      -0.3055,
+      0.21321,
+      1.10844
+    ],
+    "ee_world_m": [
+      -0.26806,
+      0.19901,
+      1.24233
+    ],
+    "close_rad": 0.5,
+    "finger_joint_rad": 0.5002617835998535,
+    "tactile_peak_sum": 13933.1,
+    "measured_at": "20260820_114055"
+  },
+  "42.0": {
+    "diameter_mm": 42.0,
+    "method": "measured_live_pad",
+    "TOOL_OFFSET_Z": 0.15464,
+    "TOOL_OFFSET_Z_case_origin": 0.13254,
+    "pad_center_above_case_m": 0.0221,
+    "ee_to_grasp_center_offset_world_m": [
+      -7e-05,
+      -1e-05,
+      -0.13254
+    ],
+    "ee_to_pad_right_world_m": [
+      0.0425,
+      -0.01421,
+      -0.13255
+    ],
+    "ee_to_pad_left_world_m": [
+      -0.04263,
+      0.01419,
+      -0.13254
+    ],
+    "pad_right_closed_world_m": [
+      -0.22557,
+      0.18479,
+      1.10977
+    ],
+    "pad_left_closed_world_m": [
+      -0.3107,
+      0.21318,
+      1.10979
+    ],
+    "ee_world_m": [
+      -0.26807,
+      0.19899,
+      1.24232
+    ],
+    "close_rad": 0.406,
+    "finger_joint_rad": 0.4063641130924225,
+    "tactile_peak_sum": 14805.2,
+    "measured_at": "20260820_125200"
+  },
+  "60.0": {
+    "diameter_mm": 60.0,
+    "method": "measured_live_pad",
+    "TOOL_OFFSET_Z": 0.15099,
+    "TOOL_OFFSET_Z_case_origin": 0.12889,
+    "pad_center_above_case_m": 0.0221,
+    "ee_to_grasp_center_offset_world_m": [
+      -6e-05,
+      -1e-05,
+      -0.12889
+    ],
+    "ee_to_pad_right_world_m": [
+      0.05148,
+      -0.0142,
+      -0.1289
+    ],
+    "ee_to_pad_left_world_m": [
+      -0.05161,
+      0.01419,
+      -0.12889
+    ],
+    "pad_right_closed_world_m": [
+      -0.2166,
+      0.18477,
+      1.11344
+    ],
+    "pad_left_closed_world_m": [
+      -0.31969,
+      0.21317,
+      1.11346
+    ],
+    "ee_world_m": [
+      -0.26808,
+      0.19898,
+      1.24234
+    ],
+    "close_rad": 0.236,
+    "finger_joint_rad": 0.23654738068580627,
+    "tactile_peak_sum": 14314.3,
+    "measured_at": "20260820_135810"
   }
 }

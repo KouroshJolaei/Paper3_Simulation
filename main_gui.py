@@ -45,9 +45,61 @@ CYL_L = 140.0   # cylinder length   (mm) — live, set by the Object size field
 GRIP_OPEN = 12.0  # half-gap of each pad from the cylinder rim before closing (mm, visual)
 ROBOT_BASE_MM = np.array([20.93, -337.5, 992.75])  # robot base_link world (mm)
 
+# ---- the gripper BODY, for the grid designer's collision check (mm) -------
+# The check asks one question at every grid point: does the ROD end up inside
+# the GRIPPER BODY? Two numbers describe that body.
+#
+# PALM_DROP_MM   how far PAST THE FLANGE the palm's underside sits, measured
+#                along the tool axis. MEASURED: 10.79 (flange -> palm) + 75.9
+#                (housing drop) — the same pair the FRONT preview already
+#                draws its palm line with. For a rod grasped near its axis
+#                this is the number that binds, always.
+# PALM_RADIUS_MM how wide the body is. NOT MEASURED. Read off the outer
+#                envelope of the base spheres in cuRobo's ur5e_gripper.yml
+#                (+-51 x +-54 mm), which are inflated for planning and so
+#                over-state the real plate. Checked 2026-08-22: the verdict
+#                on a centred cylinder is IDENTICAL at 40 / 45 / 50 / 54 mm,
+#                because a rod of D <= 60 never reaches the body's rim. Put
+#                calipers on the real plate when convenient and correct this
+#                one line; nothing else depends on it.
+#
+# NOT MODELLED, on purpose: the fingers and the pads. They must touch the
+# object — that is their job — so any honest model of them collides with it
+# at every valid grasp. cuRobo's own tool model leaves them out for exactly
+# this reason (see the v4 comment in ur5e_gripper.yml). Residual exposure:
+# a finger TIP alone catching the rod.
+PALM_DROP_MM     = 86.69
+PALM_RADIUS_MM   = 54.0
+GRIPPER_CLEAR_MM = 5.0     # required air gap, rod surface to gripper body
+
+# ---- the measured throat, which SUPERSEDES the two constants above --------
+# probe_finger_throat.py drives the gripper to each calibrated close_rad and
+# records, at every depth past the flange, how close the nearest piece of
+# gripper comes to the tool axis. That is the same question the palm disc was
+# guessing at, answered by measurement and over the WHOLE depth range rather
+# than stopping at 86.69 — so when this file is present it is used instead,
+# and the palm disc survives only as a fallback for machines without it.
+#
+# It exists because a Ø60 grasp at pad_dz +29.64 returned peak 4 counts while
+# the same pose at +50.0 returned 13617: the rod's top end was jamming in the
+# fingers, 15 mm BELOW where the palm disc stops looking. The probe put the
+# Ø60 threshold at 112.0 mm against observations of 110.6 (dead) and 120.1
+# (firm) — it predicted the failure it was written to explain, to 1.4 mm.
+# The margin is BRACKETED BY OBSERVATION, not chosen for comfort:
+#   Ø60 pad_dz +29.64  -0.06 mm  peak 4      DEAD
+#   Ø26 pad_dz +16.31  +1.88 mm  lowest point of the six upright runs
+#   Ø60 pad_dz +39.15  +3.13 mm  peak 14314  the calibration pose
+# so the boundary lies between -0.06 and +1.88, and anything at or above 1.88
+# would reject grasps that demonstrably worked. 1 mm sits inside that window
+# and still allows for the probe reading mesh VERTICES, where the true surface
+# can bulge slightly between them. Widen it only against new evidence.
+THROAT_MARGIN_MM   = 1.0
+
 # ---- paths for the config-save + Isaac-launch bridge (Stage B) ----
 PROJECT   = os.path.expanduser("~/Paper3_Simulation")
 CONFIG_JSON = os.path.join(PROJECT, "Data", "gui_config.json")
+# measured gripper throat, written by probe_finger_throat.py (see above)
+FINGER_THROAT_PATH = os.path.join(PROJECT, "Data", "finger_throat.json")
 # 3-panel preview snapshot, written next to the config on every save. The
 # collector copies it into the run folder so each run carries a picture of the
 # grid design it was launched with (added 2026-08-04).
@@ -145,14 +197,226 @@ def rotate_offsets(offs, roll_deg):
                     float(gy * c - gx * s)))  # new Y
     return out
 
+def _tool_basis(roll_deg):
+    """World columns of the TOOL frame at a given pad roll.
+
+    The collector points the tool down with TOOL_DOWN_ROTVEC = [2.2214,
+    2.2214, 0] — a pi turn about (1,1,0)/sqrt2 — which is the matrix
+        R0 = [[0,1,0],[1,0,0],[0,0,-1]]
+    i.e. tool x -> world +Y, tool y -> world +X, tool z (the APPROACH axis,
+    flange towards the pads) -> world -Z. Roll is applied about the tool's
+    OWN y (GRASP_ROT_AXIS="y"), which is world X, so it turns the pad inside
+    its own face plane: R = R0 @ Ry(theta).
+
+    VERIFIED against a measured number, not asserted. With this matrix the
+    flange of a 20 deg rolled grasp sits 156.57*sin20 = 53.5 mm in -Y and
+    156.57*(1-cos20) = 9.4 mm lower than the upright case — the two entries
+    in the pivot-correction table of handoff v8 section 4.2, which were
+    measured in Isaac. A sign error here would flip both.
+    """
+    th = np.radians(float(roll_deg))
+    c, s = np.cos(th), np.sin(th)
+    return np.array([[0.0, 1.0, 0.0],
+                     [c,   0.0, s  ],
+                     [s,   0.0, -c ]])
+
+
+def _rod_cloud(diameter_mm, length_mm, tilt_deg=0.0, tilt_axis="X",
+               ax_mm=2.0, n_ang=24, cap_mm=2.0):
+    """Points on the rod's SURFACE, mm, relative to the object centre.
+
+    Sampled rather than solved: the rod and the gripper body are two
+    flat-ended cylinders at an arbitrary relative angle, and the closed-form
+    distance between those is a page of cases, every one of which is a place
+    to be quietly wrong. A cloud at ~2 mm spacing tested against an
+    analytic body is a few lines, and it is checked against the old scalar
+    rule below to 0.01 mm at 0 deg.
+
+    Both caps are included: a low grasp puts the rod's TOP CAP into the palm,
+    and that is the whole point of the check."""
+    R = float(diameter_mm) / 2.0
+    L = float(length_mm)
+    zs = np.arange(-L / 2.0, L / 2.0 + 1e-9, float(ax_mm))
+    th = np.arange(int(n_ang)) * (2 * np.pi / int(n_ang))
+    Z, T = np.meshgrid(zs, th, indexing="ij")
+    side = np.stack([R * np.cos(T).ravel(), R * np.sin(T).ravel(),
+                     Z.ravel()], axis=1)
+    caps = [side]
+    for zc in (-L / 2.0, L / 2.0):
+        for rr in np.arange(0.0, R + 1e-9, float(cap_mm)):
+            if rr <= 1e-9:
+                caps.append(np.array([[0.0, 0.0, zc]])); continue
+            n = max(6, int(2 * np.pi * rr / float(cap_mm)))
+            a = np.arange(n) * (2 * np.pi / n)
+            caps.append(np.stack([rr * np.cos(a), rr * np.sin(a),
+                                  np.full(n, zc)], axis=1))
+    pts = np.vstack(caps)
+    t = np.radians(float(tilt_deg)); c, s = np.cos(t), np.sin(t)
+    if tilt_axis == "X":
+        R3 = np.array([[1, 0, 0], [0, c, -s], [0, s, c]], float)
+    elif tilt_axis == "Y":
+        R3 = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], float)
+    else:
+        R3 = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], float)
+    return pts @ R3.T
+
+
+def grid_gripper_gap_mm(offs, pad_dz_mm, tool_offset_z_mm, pad_roll_deg,
+                        cloud):
+    """Gap between the rod's surface and the gripper body, one per grid point.
+
+    Negative means the rod is INSIDE the body — the gripper would be driven
+    into the object, which in Isaac shows up as PhysX resisting and the
+    descent ending short of target, and in the data as a thin or empty map.
+
+    offs are grid_2d/rotate_offsets entries, (gx, gy) = (world Z, world Y)
+    step. The object's world position cancels: only the pad's offset from the
+    object centre matters, so this works before any pose has been typed in.
+    The pad's X is not a free variable — the collector centres the tool axis
+    on the rod axis in X (x_fixed_centered)."""
+    Rt = _tool_basis(pad_roll_deg)
+    a = Rt[:, 2]
+    T = float(tool_offset_z_mm)
+    out = np.empty(len(offs), float)
+    for i, (gx, gy) in enumerate(offs):
+        pad = np.array([0.0, float(gy), float(pad_dz_mm) + float(gx)])
+        ee = pad - T * a                       # flange, from the pad target
+        q = (cloud - ee) @ Rt                  # rod points in the TOOL frame
+        r = np.hypot(q[:, 0], q[:, 1])
+        # body = {0 <= z <= PALM_DROP, r <= PALM_RADIUS}; positive = outside
+        out[i] = np.maximum(np.maximum(-q[:, 2], q[:, 2] - PALM_DROP_MM),
+                            r - PALM_RADIUS_MM).min()
+    return out
+
+
+def grid_pad_overhang_mm(offs, pad_dz_mm, pad_half_h, half_len_mm):
+    """How far each grasp's pad hangs PAST the rod's end, mm. <=0 is on."""
+    z = np.array([float(pad_dz_mm) + float(gx) for gx, _gy in offs])
+    return np.abs(z) + float(pad_half_h) - float(half_len_mm)
+
+
+def load_gripper_cloud(diameter_mm, path=None):
+    """The gripper as points in the TOOL frame for one diameter, or None.
+
+    Axes match _tool_basis exactly: x = ACROSS the pad, y = the CLOSING
+    direction, z = depth past the flange. probe_finger_throat.py measures all
+    three from the pads themselves, so no USD frame convention is assumed at
+    either end.
+
+    Pads are already excluded by the probe. THE FINGERS ARE EXCLUDED HERE, by
+    the WORKING RADIUS: any point at or beyond half the measured pad
+    separation is a holding surface, because that is the radius the jaw closes
+    to on this diameter. What is left is only geometry that pokes INSIDE the
+    opening — which is exactly what can stop the rod entering.
+
+    They have to go. At a valid grasp the fingers sit a millimetre or two off
+    the rod's surface, so leaving them in makes the nearest gripper point a
+    holding surface at every pose and buries the jam signal. Measured on Ø26
+    at the base height of the six upright runs: +3.12 mm with the fingers in,
+    +13.88 mm with them out — while the Ø60 dead pose stays negative either
+    way. Same reasoning as ur5e_gripper.yml's v4 comment: parts that must
+    touch the object cannot be collision-checked against it.
+
+    A depth cut was tried first and rejected: the finger's inner face runs at
+    the working radius along its whole length, so no depth splits holding from
+    throat.
+
+    Why points and not the radial profile the same file also carries: the
+    throat is NOT circular. It is narrow across the fingers and wide open the
+    other way, so one radius per depth scores a rod stepped sideways along the
+    open direction as if it had been driven into a finger. That version
+    rejected a Ø60 grid at 25 deg roll which had actually grasped (peak 395),
+    and shrank every upright grid to 3 points including Ø26, which worked at
+    pad_dz +28.31 across six runs."""
+    path = path or FINGER_THROAT_PATH
+    try:
+        with open(path, "r") as f:
+            doc = json.load(f)
+        d = doc.get("diameters", {})
+        ent = d.get(f"{float(diameter_mm):.1f}") or d.get(str(float(diameter_mm)))
+        if ent is None:
+            return None
+        pts = np.asarray(ent.get("cloud_xyz_mm", []), float)
+        if pts.ndim != 2 or not len(pts):
+            return None
+        sep = float(ent.get("pad_separation_mm", 0.0))
+        if sep > 0.0:
+            lat = np.hypot(pts[:, 0], pts[:, 1])
+            pts = pts[lat < sep / 2.0]
+        return pts if len(pts) else None
+    except Exception:
+        return None
+
+
+def grid_gripper_cloud_gap_mm(offs, pad_dz_mm, tool_offset_z_mm, pad_roll_deg,
+                              gcloud, diameter_mm, length_mm,
+                              obj_tilt_deg=0.0, obj_tilt_axis="X"):
+    """Smallest distance from the GRIPPER to the ROD, one value per grid point.
+
+    Negative means a piece of gripper is inside the object — the rod would jam
+    against the fingers and hold the pads off, which reads as a dead map
+    rather than as a crash.
+
+    The rod is solved analytically (exact for a finite cylinder, tilt
+    included) and the gripper is sampled, which is the right way round: the
+    gripper is the awkward shape and the rod is the simple one. Roll is
+    handled for free, because the whole cloud rides the tool frame."""
+    Rt = _tool_basis(pad_roll_deg)
+    a_tool = Rt[:, 2]
+    T = float(tool_offset_z_mm)
+    G = gcloud @ Rt.T                          # gripper in the object frame
+    pads = np.array([[0.0, float(gy), float(pad_dz_mm) + float(gx)]
+                     for gx, gy in offs], float)
+    ee = pads - T * a_tool                     # (M,3) flange per grid point
+    P = ee[:, None, :] + G[None, :, :]         # (M,N,3)
+
+    th = np.radians(float(obj_tilt_deg))
+    c, s = np.cos(th), np.sin(th)
+    if obj_tilt_axis == "X":
+        ax = np.array([0.0, -s, c])
+    elif obj_tilt_axis == "Y":
+        ax = np.array([s, 0.0, c])
+    else:
+        ax = np.array([0.0, 0.0, 1.0])
+
+    R, H = float(diameter_mm) / 2.0, float(length_mm) / 2.0
+    t = P @ ax                                 # axial coord along the rod
+    radial = np.linalg.norm(P - t[..., None] * ax, axis=2)
+    # SIGNED, and the sign is the whole point. Clamping both terms at zero —
+    # as the first version did — reports a point INSIDE the rod as 0.00 mm
+    # rather than as interference, so the Ø60 dead pose (exactly one gripper
+    # point inside the object) scored the same as a graze and passed.
+    outside = np.sqrt(np.maximum(radial - R, 0.0) ** 2 +
+                      np.maximum(np.abs(t) - H, 0.0) ** 2)
+    inside = np.minimum(R - radial, H - np.abs(t))
+    d = np.where(outside > 0.0, outside, -np.maximum(inside, 0.0))
+    return d.min(axis=1)
+
+
 def design_grid(diameter_mm, length_mm, tool_offset_z_mm, step_mm=6.0,
                 pad_roll_deg=0.0, indent_mm=2.4, across_margin_mm=3.0,
-                palm_clear_mm=5.0, canvas_mm=96.0):
-    """Choose nx, ny and the base pad height from the OBJECT's geometry.
+                palm_clear_mm=5.0, canvas_mm=96.0, obj_tilt_deg=0.0,
+                obj_tilt_axis="X"):
+    """Choose the two grid counts and the base pad height from the OBJECT.
 
     Returns (ok, result_dict, [reason lines]). Every number it picks is
     derived from a stated limit, and every limit is reported, so the choice
     can be read off the screen instead of trusted.
+
+    IT RETURNS n_across AND n_along, NOT nx AND ny (2026-08-22). Those two
+    names meant opposite things at the two ends of this handover and nobody
+    could see it: this function derived one count from the ACROSS band and
+    one from the ALONG window, while grid_2d's nx steps along world Z (UP
+    the rod) and its ny across world Y. do_design_grid passed them straight
+    through, so every automatic grid ran transposed. Proved on
+    run_20260821_165542 (D42, 25 deg): the observed vertical excursion of
+    29.358 mm equals 24*cos25 + 18*sin25 to 0.001 mm, which only holds if
+    the count derived from the across band was driving the vertical steps.
+    Costs, both real: the vertical sweep overran its own window (palm), and
+    on the upright runs the across sweep reached +-18 mm against a designed
+    +-15.53, leaving 0.53 mm of pad inside the contact band at the outermost
+    column — near-empty maps. The names now say which is which and the
+    caller must map them deliberately.
 
     WHY THIS EXISTS. nx, ny, step and pad_dz were typed by hand, and a wrong
     guess is expensive: on run_20260808_234035 the top grasps sat at
@@ -185,8 +449,30 @@ def design_grid(diameter_mm, length_mm, tool_offset_z_mm, step_mm=6.0,
     quantity stitching.pad_half_extents computes, so the designer and the
     stitcher agree about how much room a rolled pad needs.
 
+    THE FIFTH LIMIT: EVERY POINT IS CHECKED, NOT THE WINDOW (2026-08-22).
+    The four limits above are scalars applied to the base height, and two
+    things slip through them once the pad is rolled. First, the palm limit
+    measured the lever arm as if the tool were still vertical; a rolled tool
+    holds its palm only (TOOL_OFFSET_Z - 86.69)*cos(roll) above the pad, so
+    the clearance was over-stated by 6.5 mm at 25 deg and 20 mm at 45 deg.
+    Second, when the grid steps in the PAD's frame the ACROSS steps carry a
+    vertical component of n_across*step*sin(roll) that the along window
+    never saw — another 10.1 mm on that D42 run. Together with the transpose
+    above, 7 of its 63 points put the rod INSIDE the gripper body, worst
+    -3.15 mm, and 14 sat inside the 5 mm margin.
+
+    So the grid is now verified point by point against the real gripper
+    body: the rod's surface versus a cylinder of PALM_RADIUS_MM reaching
+    PALM_DROP_MM past the flange, at each point's own rolled tool pose. If a
+    grid fails, the height is re-centred first and the counts are shrunk
+    only if that is not enough — and if nothing works it REFUSES, because a
+    grid that collides quietly is worse than no grid. At 0 deg roll this
+    reproduces the old scalar palm rule to 0.01 mm, so upright designs are
+    unchanged.
+
     STEP IS NOT CHOSEN. It is pinned by the caller (6 mm) so that coverage
-    density is identical on every object; only nx, ny and the height adapt.
+    density is identical on every object; only the counts and the height
+    adapt.
     """
     D, L = float(diameter_mm), float(length_mm)
     step = float(step_mm)
@@ -211,13 +497,14 @@ def design_grid(diameter_mm, length_mm, tool_offset_z_mm, step_mm=6.0,
     # ---- ACROSS -----------------------------------------------------------
     band = float(np.sqrt(indent_mm * (D - indent_mm)))
     across_max = pad_hw + band - across_margin_mm
-    nx = int(np.floor(max(0.0, across_max) / step))
+    n_across = int(np.floor(max(0.0, across_max) / step))
     why.append(f"ACROSS: contact band half-width = sqrt({indent_mm:.1f} x "
                f"({D:.1f} - {indent_mm:.1f})) = {band:.2f} mm "
                f"(a {2*band:.1f} mm band)")
     why.append(f"        pad centre may reach {pad_hw:.1f} + {band:.2f} - "
                f"{across_margin_mm:.1f} = {across_max:.2f} mm "
-               f"-> nx = floor({across_max:.2f}/{step:.1f}) = {nx}")
+               f"-> n_across = floor({across_max:.2f}/{step:.1f}) "
+               f"= {n_across}")
 
     # ---- ALONG: the feasible window for the pad centre ---------------------
     # palm_z = pad_z + (TOOL_OFFSET_Z - 86.69); it must clear the rod top.
@@ -239,26 +526,147 @@ def design_grid(diameter_mm, length_mm, tool_offset_z_mm, step_mm=6.0,
             f"(the window closes when L/2 > {palm_above_pad - palm_clear_mm + pad_hh:.1f} mm)."]
 
     span = dz_hi - dz_lo                       # total travel available, mm
-    ny_travel = int(np.floor((span / 2.0) / step))
-    ny_canvas = int(np.floor((canvas_mm - 2 * pad_hh) / (2 * step)))
-    ny = max(0, min(ny_travel, ny_canvas))
-    bound = "rod end / palm" if ny_travel <= ny_canvas else "pair canvas"
-    why.append(f"        window is {span:.2f} mm wide -> ny <= {ny_travel} "
-               f"by travel, <= {ny_canvas} by the {canvas_mm:.0f} mm canvas "
-               f"-> ny = {ny} (bound by {bound})")
+    nl_travel = int(np.floor((span / 2.0) / step))
+    nl_canvas = int(np.floor((canvas_mm - 2 * pad_hh) / (2 * step)))
+    n_along = max(0, min(nl_travel, nl_canvas))
+    bound = "rod end / palm" if nl_travel <= nl_canvas else "pair canvas"
+    why.append(f"        window is {span:.2f} mm wide -> n_along <= "
+               f"{nl_travel} by travel, <= {nl_canvas} by the "
+               f"{canvas_mm:.0f} mm canvas -> n_along = {n_along} "
+               f"(bound by {bound})")
 
     pad_dz = (dz_lo + dz_hi) / 2.0             # centre the sweep in the window
     why.append(f"        base pad height = midpoint of the window = "
                f"{pad_dz:+.2f} mm")
 
+    # ---- VERIFY EVERY POINT against the real gripper body ------------------
+    # Everything above is a scalar rule about the base height. This is the
+    # part that actually looks at the grid that will be run.
+    cloud = _rod_cloud(D, L, obj_tilt_deg, obj_tilt_axis)
+    gcloud = load_gripper_cloud(D)
+    if gcloud is not None:
+        clear_mm = THROAT_MARGIN_MM
+        why.append(f"CHECK : every point tested against the MEASURED gripper "
+                   f"({len(gcloud)} points, finger_throat.json), margin "
+                   f"{clear_mm:.1f} mm")
+    else:
+        clear_mm = palm_clear_mm
+        why.append(f"CHECK : finger_throat.json NOT FOUND — falling back to "
+                   f"the palm disc, which stops at {PALM_DROP_MM:.1f} mm and "
+                   f"CANNOT see a rod jammed in the fingers. Run "
+                   f"probe_finger_throat.py.")
+
+    def _offsets(n_across_, n_along_):
+        # THE HANDOVER, stated once and in one place: grid_2d's FIRST count
+        # steps along world Z (up the rod), its SECOND across world Y.
+        offs = grid_2d(n_along_, n_across_, step, centered=True)
+        return rotate_offsets(offs, pad_roll_deg)
+
+    def _gaps(offs, dz_):
+        if gcloud is not None:
+            return grid_gripper_cloud_gap_mm(
+                offs, dz_, tool_offset_z_mm, pad_roll_deg, gcloud, D, L,
+                obj_tilt_deg, obj_tilt_axis)
+        return grid_gripper_gap_mm(offs, dz_, tool_offset_z_mm,
+                                   pad_roll_deg, cloud)
+
+    def _worst(n_across_, n_along_, dz_):
+        offs = _offsets(n_across_, n_along_)
+        gap = _gaps(offs, dz_)
+        over = grid_pad_overhang_mm(offs, dz_, pad_hh, L / 2.0)
+        return float(gap.min()), float(over.max()), gap, over
+
+    def _lowest_clear_dz(n_across_, n_along_):
+        """Smallest base height at which no point touches the gripper.
+        Raising the tool always carries the rod's top DEEPER into free space
+        (by cos(roll) per mm), so the gap rises monotonically with dz and a
+        bisection is exact to the tolerance. Returns None if even the top of
+        the search range collides."""
+        lo, hi = dz_lo - 60.0, dz_hi + 60.0
+        if _worst(n_across_, n_along_, hi)[0] < clear_mm:
+            return None
+        for _ in range(40):
+            mid = 0.5 * (lo + hi)
+            if _worst(n_across_, n_along_, mid)[0] >= clear_mm:
+                hi = mid
+            else:
+                lo = mid
+            if hi - lo < 0.01:
+                break
+        return hi
+
+    # Shrink the LESS informative axis first. Below 45 deg the along steps
+    # dominate the vertical excursion (cos > sin) and across coverage is the
+    # direction the completion model actually learns from, so along goes
+    # first; past 45 deg the roles swap and so does the order.
+    _c, _s = (abs(np.cos(np.radians(pad_roll_deg))),
+              abs(np.sin(np.radians(pad_roll_deg))))
+    shrink_first_along = (_c >= _s)
+
+    trimmed = []
+    dz_mid = pad_dz                     # what the four scalar limits wanted
+    while True:
+        need = _lowest_clear_dz(n_across, n_along)
+        if need is not None:
+            # The window's midpoint stays the preference — it is what keeps
+            # the sweep centred on the rod. Only if it fails is the height
+            # moved, and then only to the nearest value that works: up to
+            # `need` if the palm is the problem, down to the highest height
+            # that keeps every pad on the rod if the end is.
+            offs = _offsets(n_across, n_along)
+            gx_hi = max(gx for gx, _gy in offs)
+            # 0.01 mm off the rim, not on it: clipping to the exact boundary
+            # lands the last pad's bounding box on the rod's end face and
+            # floating point then decides whether that counts as "off". The
+            # back-off is 3x below the pipeline's own +-0.03 mm placement
+            # accuracy, so it costs nothing real and makes the answer stable.
+            dz_end = (L / 2.0) - pad_hh - gx_hi - 0.01
+            if need <= dz_end + 1e-9:
+                chosen = float(np.clip(dz_mid, need, dz_end))
+                g, o, _, _ = _worst(n_across, n_along, chosen)
+                if g >= clear_mm and o <= 1e-6:
+                    if abs(chosen - dz_mid) > 0.01:
+                        why.append(
+                            f"        base height moved {dz_mid:+.2f} -> "
+                            f"{chosen:+.2f} mm: the midpoint put the rod "
+                            + ("into the gripper" if chosen > dz_mid
+                               else "a pad off the rod end"))
+                    pad_dz = chosen
+                    break
+        # cannot be fixed by height alone -> drop a step from one axis
+        if shrink_first_along and n_along > 0:
+            n_along -= 1; trimmed.append("n_along")
+        elif n_across > 0:
+            n_across -= 1; trimmed.append("n_across")
+        elif n_along > 0:
+            n_along -= 1; trimmed.append("n_along")
+        else:
+            g, o, _, _ = _worst(0, 0, pad_dz)
+            return False, {}, why + [
+                "REFUSED: even a single grasp at this height cannot be made "
+                f"safe (gripper gap {g:+.1f} mm, pad overhang {o:+.1f} mm).",
+                "The rod is too long for the gripper to reach this low, or "
+                "the roll swings the palm into it. Shorten the object, "
+                "reduce the roll, or grasp higher."]
+
+    gap, over = _worst(n_across, n_along, pad_dz)[2:]
+    if trimmed:
+        why.append(f"        POINT CHECK trimmed {len(trimmed)} step(s) "
+                   f"({', '.join(sorted(set(trimmed)))}): the four limits "
+                   f"above are scalars, and the rolled grid's corners reach "
+                   f"further than any of them describe")
+    why.append(f"        worst rod-to-gripper gap {gap.min():+.2f} mm "
+               f"(need {clear_mm:.1f}); worst pad overhang past the rod "
+               f"end {over.max():+.2f} mm (need <= 0)")
+
     # ---- report what the choice actually costs -----------------------------
-    used_y = 2 * pad_hw + 2 * nx * step
-    used_z = 2 * pad_hh + 2 * ny * step
-    n_pts = (2 * nx + 1) * (2 * ny + 1)
+    used_y = 2 * pad_hw + 2 * n_across * step
+    used_z = 2 * pad_hh + 2 * n_along * step
+    n_pts = (2 * n_across + 1) * (2 * n_along + 1)
     cov_y = (2 * pad_hw) / step
     cov_z = (2 * pad_hh) / step
-    why.append(f"RESULT: {2*nx+1} x {2*ny+1} = {n_pts} points at "
-               f"{step:.1f} mm, ~{n_pts*2.0:.0f} min")
+    why.append(f"RESULT: {2*n_across+1} across x {2*n_along+1} along = "
+               f"{n_pts} points at {step:.1f} mm, ~{n_pts*2.0:.0f} min")
     why.append(f"        swept area {used_y:.1f} x {used_z:.1f} mm of the "
                f"{canvas_mm:.0f} mm canvas; density ~{cov_y:.1f} x "
                f"{cov_z:.1f} grasps per cell")
@@ -267,16 +675,20 @@ def design_grid(diameter_mm, length_mm, tool_offset_z_mm, step_mm=6.0,
     if used_y > canvas_mm or used_z > canvas_mm:
         bad.append(f"swept area {used_y:.1f} x {used_z:.1f} mm exceeds the "
                    f"{canvas_mm:.0f} mm pair canvas")
-    if nx == 0 and ny == 0:
+    if n_across == 0 and n_along == 0:
         bad.append("no room to move in either direction — a single grasp is "
                    "not a sweep")
     if bad:
         return False, {}, why + bad
 
-    return True, {"nx": nx, "ny": ny, "step_mm": step, "pad_dz_mm": pad_dz,
+    return True, {"n_across": n_across, "n_along": n_along,
+                  "step_mm": step, "pad_dz_mm": pad_dz,
                   "n_points": n_pts, "band_mm": 2 * band,
                   "swept_mm": (used_y, used_z), "bound_by": bound,
-                  "dz_window": (dz_lo, dz_hi)}, why
+                  "dz_window": (dz_lo, dz_hi),
+                  "gap_mm": float(gap.min()),
+                  "overhang_mm": float(over.max()),
+                  "trimmed": trimmed}, why
 
 
 class CockpitGUI:
@@ -308,6 +720,7 @@ class CockpitGUI:
             # grid mirrors around the entered pad offset instead of starting there
             "grid_centered": tk.BooleanVar(value=False),
             "grid_pad_frame": tk.BooleanVar(value=True),
+            "export_anchors": tk.BooleanVar(value=True),
             "headless": tk.BooleanVar(value=False),   # False = show Isaac window
             "calib_headless": tk.BooleanVar(value=False),  # Calibrate tab headless toggle
             "calib_dz": tk.StringVar(value="0.0"),  # Calibrate pad Z offset (Y stays centered)
@@ -322,6 +735,11 @@ class CockpitGUI:
             # reach. Turn OFF while iterating on a config you have already
             # proven, to save that time. Emitted as GRASP_REACH_CHECK.
             "reach_check": tk.BooleanVar(value=True),
+            # Emitted as GRASP_TOOL_COLLISION. Default ON: the collector's own
+            # log says that without it "a plan that sweeps the FINGERS or the
+            # PADS through the object will still look safe", and every run so
+            # far was made with it off.
+            "tool_collision": tk.BooleanVar(value=True),
             # Stitch-tab: fit the contact band width from the run's own maps
             "blob_fit_width": tk.BooleanVar(value=False),
             # ---- colour-scale policy (2026-08-04) ----
@@ -415,11 +833,19 @@ class CockpitGUI:
                    command=self.pick_session).pack(side="left", padx=4)
         ttk.Button(_sf, text="Open folder",
                    command=self.open_session_folder).pack(side="left")
+        ttk.Button(_sf, text="Data folder...",
+                   command=self.set_run_root).pack(side="left", padx=4)
+        self.run_root_lbl = ttk.Label(frm, text="", foreground="#555",
+                                      wraplength=430, justify="left")
+        self.run_root_lbl.grid(row=r, column=0, columnspan=2,
+                               sticky="w"); r += 1
         ttk.Label(frm, text="(the folder name is fixed when you press New "
                             "session; press it again after changing angles)",
                   foreground="#888", wraplength=430,
                   justify="left").grid(row=r, column=0, columnspan=2,
                                        sticky="w"); r += 1
+        self._run_root = self._load_run_root()
+        self._refresh_root_label()
 
         ttk.Label(frm, text="OBJECT pose (world, mm)",
                   font=("", 10, "bold")).grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
@@ -504,6 +930,11 @@ class CockpitGUI:
         ttk.Checkbutton(frm, text="Pre-check reachability before moving "
                                   "(slower, skips points the arm cannot reach)",
                         variable=self.vars["reach_check"]).grid(
+            row=r, column=0, columnspan=2, sticky="w"); r += 1
+        ttk.Checkbutton(frm, text="Model the gripper BODY in collision "
+                                  "(ur5e_gripper.yml — fingers and pads are "
+                                  "never modelled, they must touch)",
+                        variable=self.vars["tool_collision"]).grid(
             row=r, column=0, columnspan=2, sticky="w"); r += 1
         ttk.Button(frm, text="Save Config", command=self.save_config).grid(
             row=r, column=0, columnspan=2, pady=4, sticky="ew"); r += 1
@@ -1135,6 +1566,8 @@ class CockpitGUI:
                f'GRASP_ROT_AXIS="y" \\\n' if abs(_rot) > 1e-6 else "")
             + ("" if self.vars["reach_check"].get() else
                'GRASP_REACH_CHECK="0" \\\n')
+            + ('GRASP_TOOL_COLLISION="1" \\\n'
+               if self.vars["tool_collision"].get() else "")
             + f"{ISAAC_PY} {COLLECT_PY} \\\n"
             f"  --config {CONFIG_JSON}"
         )
@@ -1170,6 +1603,8 @@ class CockpitGUI:
             + f'GRASP_BASENAME="reach" \\\n'
             f'GRASP_HEADLESS="{headless}" \\\n'
             f'GRASP_REACH_ONLY="1" \\\n'
+            + ('GRASP_TOOL_COLLISION="1" \\\n'
+               if self.vars["tool_collision"].get() else "")
             + (f'GRASP_ROT_DEG="{_rot:g}" \\\n'
                f'GRASP_ROT_AXIS="y" \\\n' if abs(_rot) > 1e-6 else "")
             + f"{ISAAC_PY} {COLLECT_PY} \\\n"
@@ -1666,11 +2101,112 @@ class CockpitGUI:
         pad = self._ang_tag(self.vars["pad_rot"].get())
         return f"run_{stamp}_obj{obj}_pad{pad}"
 
+    # ---- where new sessions are created --------------------------------
+    # "Use existing..." points the session at ONE run folder, for re-plotting
+    # or re-stitching. It is not a parent directory, so it could never send
+    # NEW runs somewhere else — new_session hardcoded Data/gui_run and
+    # silently ignored whatever had been picked. This is the missing piece:
+    # a root that new_session actually uses, so a batch can be written
+    # straight to an external drive.
+    SETTINGS_PATH = os.path.join(PROJECT, "Data", "gui_settings.json")
+
+    def _default_run_root(self):
+        return os.path.join(PROJECT, "Data", "gui_run", "SIM")
+
+    def _load_run_root(self):
+        """Remembered across restarts: an overnight batch should not depend
+        on someone re-picking the drive each morning."""
+        try:
+            with open(self.SETTINGS_PATH) as f:
+                d = json.load(f)
+            p = d.get("run_root")
+            if p and os.path.isdir(p):
+                return p
+            if p:
+                print(f"[gui] saved data folder is not present: {p}")
+        except Exception:
+            pass
+        return self._default_run_root()
+
+    def _save_run_root(self, path):
+        try:
+            d = {}
+            if os.path.exists(self.SETTINGS_PATH):
+                with open(self.SETTINGS_PATH) as f:
+                    d = json.load(f)
+            d["run_root"] = path
+            os.makedirs(os.path.dirname(self.SETTINGS_PATH), exist_ok=True)
+            with open(self.SETTINGS_PATH, "w") as f:
+                json.dump(d, f, indent=2)
+        except Exception as e:
+            print(f"[gui] could not save the data folder ({e})")
+
+    def _run_root_free_gb(self, path):
+        try:
+            st = os.statvfs(path)
+            return st.f_bavail * st.f_frsize / 1e9
+        except Exception:
+            return None
+
+    def _refresh_root_label(self):
+        p = getattr(self, "_run_root", None) or self._default_run_root()
+        free = self._run_root_free_gb(p)
+        ext = not p.startswith(os.path.expanduser("~"))
+        txt = f"data folder: {p}"
+        if free is not None:
+            txt += f"   ({free:.0f} GB free)"
+        if hasattr(self, "run_root_lbl"):
+            self.run_root_lbl.config(
+                text=txt,
+                foreground=("#b00" if (free is not None and free < 5)
+                            else ("#7b2fbe" if ext else "#555")))
+
+    def set_run_root(self):
+        """Choose the PARENT folder that new sessions are created in."""
+        from tkinter import filedialog
+        d = filedialog.askdirectory(
+            initialdir=(getattr(self, "_run_root", None)
+                        or self._default_run_root()),
+            title="Pick the folder that NEW run sessions will be created in")
+        if not d:
+            return
+        # Writability is checked here, not at run time: discovering a
+        # read-only or unmounted drive after a 45-minute grasp has already
+        # started is the expensive way to find out.
+        try:
+            t = os.path.join(d, ".gui_write_test")
+            with open(t, "w") as f:
+                f.write("x")
+            os.remove(t)
+        except Exception as e:
+            messagebox.showerror("Data folder",
+                f"Cannot write to:\n{d}\n\n{e}\n\n"
+                "Nothing was changed.")
+            return
+        self._run_root = d
+        self._save_run_root(d)
+        self._refresh_root_label()
+        free = self._run_root_free_gb(d)
+        messagebox.showinfo("Data folder",
+            f"New sessions will be created in:\n{d}\n\n"
+            + (f"{free:.0f} GB free.\n\n" if free is not None else "")
+            + "Runs already open are unaffected. This is remembered between "
+              "restarts.")
+
     def new_session(self):
         """Mint a new session folder from the clock and the current angles.
         Everything after this — reachability, the run, heatmaps, stitching —
         lands in this one folder."""
-        path = os.path.join(PROJECT, "Data", "gui_run", self._session_name())
+        root = getattr(self, "_run_root", None) or self._default_run_root()
+        if not os.path.isdir(root):
+            try:
+                os.makedirs(root, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror("Session",
+                    f"The data folder is not available:\n{root}\n\n{e}\n\n"
+                    "If it is an external drive, is it still plugged in?")
+                return
+        path = os.path.join(root, self._session_name())
         try:
             os.makedirs(path, exist_ok=True)
         except Exception as e:
@@ -1781,18 +2317,14 @@ class CockpitGUI:
                 messagebox.showinfo("Heatmaps", "No heatmaps produced.")
                 return
 
-            # one window per grid point (the proven verification-style display)
-            import matplotlib.pyplot as plt
-            import matplotlib.image as mpimg
-            for png in made:
-                fig = plt.figure(figsize=(8.5, 4.5))
-                ax = fig.add_subplot(1, 1, 1)
-                ax.imshow(mpimg.imread(png)); ax.axis("off")
-                ax.set_title(os.path.basename(png))
-                fig.tight_layout()
-            plt.show()
+            # SAVE ONLY (2026-08-22). This used to open one matplotlib
+            # window per grid point, which on a 63-point sweep buries the
+            # screen in 63 windows and makes the cockpit unusable until they
+            # are all closed. The PNGs are already on disk in Heatmaps/ and a
+            # file browser shows them side by side far better than Tk can.
             self.status.config(
-                text=f"heatmaps: {len(made)} grasps (s1|s2)\nsaved to Heatmaps/",
+                text=(f"heatmaps: {len(made)} grasps (s1|s2) saved to "
+                      f"Heatmaps/ — not opened"),
                 foreground="#0a6")
         except Exception:
             messagebox.showerror("Heatmaps",
@@ -1929,8 +2461,49 @@ class CockpitGUI:
 
     # ---------- Stitching tab (Block 2) ----------
     def _build_stitch_tab(self):
-        frm = ttk.Frame(self.tab_stitch, padding=14)
-        frm.grid(row=0, column=0, sticky="nw")
+        # SCROLLABLE (2026-08-22). The tab grew past the window: the blob-axis
+        # block and the status line sat below the bottom edge with no way to
+        # reach them. Everything below is unchanged and still grids into
+        # `frm` — `frm` now simply lives inside a Canvas that can scroll.
+        _outer = ttk.Frame(self.tab_stitch)
+        _outer.grid(row=0, column=0, sticky="nsew")
+        self.tab_stitch.rowconfigure(0, weight=1)
+        self.tab_stitch.columnconfigure(0, weight=1)
+        _outer.rowconfigure(0, weight=1)
+        _outer.columnconfigure(0, weight=1)
+
+        _cv = tk.Canvas(_outer, highlightthickness=0)
+        _cv.grid(row=0, column=0, sticky="nsew")
+        _sb = ttk.Scrollbar(_outer, orient="vertical", command=_cv.yview)
+        _sb.grid(row=0, column=1, sticky="ns")
+        _cv.configure(yscrollcommand=_sb.set)
+
+        frm = ttk.Frame(_cv, padding=14)
+        _win = _cv.create_window((0, 0), window=frm, anchor="nw")
+        frm.bind("<Configure>",
+                 lambda e: _cv.configure(scrollregion=_cv.bbox("all")))
+        # keep the content the width of the viewport so wraplength labels
+        # behave exactly as they did before the canvas existed
+        _cv.bind("<Configure>",
+                 lambda e: _cv.itemconfigure(_win, width=e.width))
+
+        # Wheel scrolling, bound to the canvas rather than globally so the
+        # other tabs and any entry field keep their own behaviour. Linux
+        # sends Button-4/5, not MouseWheel.
+        def _wheel(ev):
+            if getattr(ev, "num", None) == 4:
+                _cv.yview_scroll(-1, "units")
+            elif getattr(ev, "num", None) == 5:
+                _cv.yview_scroll(1, "units")
+            else:
+                _cv.yview_scroll(int(-1 * (ev.delta / 120)), "units")
+        for _w in (_cv, frm):
+            _w.bind("<Enter>", lambda e: (_cv.bind_all("<MouseWheel>", _wheel),
+                                          _cv.bind_all("<Button-4>", _wheel),
+                                          _cv.bind_all("<Button-5>", _wheel)))
+            _w.bind("<Leave>", lambda e: (_cv.unbind_all("<MouseWheel>"),
+                                          _cv.unbind_all("<Button-4>"),
+                                          _cv.unbind_all("<Button-5>")))
         r = 0
         ttk.Label(frm, text="BLOCK 2 — stitch per-grasp maps into ONE extended contact map",
                   font=("", 10, "bold")).grid(row=r, column=0, columnspan=3, sticky="w"); r += 1
@@ -1960,6 +2533,21 @@ class CockpitGUI:
         ttk.Button(frm, text="Export Training Pair (center -> extended)",
                    command=self.do_export_pair).grid(
             row=r, column=0, columnspan=3, sticky="ew", pady=3); r += 1
+        ttk.Checkbutton(
+            frm,
+            text="also export ANCHORED pairs (one per grasp, into "
+                 "Stitched/pairs/)",
+            variable=self.vars["export_anchors"]).grid(
+            row=r, column=0, columnspan=3, sticky="w"); r += 1
+        ttk.Label(frm, justify="left", foreground="#555", wraplength=430, text=(
+            "Re-centres the canvas on each grasp instead of only pt00, so one "
+            "sweep yields many pairs at no robot cost. training_pair.npz is "
+            "untouched. Measured on 6 rolled-pad runs: tactile-centroid error "
+            "fell 5.96 -> 3.58 mm (interior) -> 3.00 mm (with edge anchors), "
+            "crossing Paper 1's 4.42 mm safe-zone threshold; L1 and SSIM were "
+            "flat. They are AUGMENTATION, not new objects -- train.py decides "
+            "which to use via --anchors, and always validates on pt00 only.")
+        ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, 4)); r += 1
         ttk.Button(frm, text="Grid Accuracy (designed vs actual movement)",
                    command=self.do_grid_accuracy).grid(
             row=r, column=0, columnspan=3, sticky="ew", pady=3); r += 1
@@ -2081,7 +2669,9 @@ class CockpitGUI:
 
             ok, res, why = design_grid(
                 CYL_D, CYL_L, float(cal["TOOL_OFFSET_Z"]) * 1000.0,
-                step_mm=step, pad_roll_deg=roll)
+                step_mm=step, pad_roll_deg=roll,
+                obj_tilt_deg=float(cfg.get("tilt_deg", 0.0)),
+                obj_tilt_axis=str(cfg.get("tilt_axis", "X")))
             text = "\n".join(why)
             if not ok:
                 self.design_lbl.config(text="design REFUSED — see dialog",
@@ -2091,20 +2681,35 @@ class CockpitGUI:
                     "object, or the pad roll and try again.")
                 return
 
-            # fill the ordinary fields; nothing else in the GUI changes
-            self.vars["grid_nx"].set(str(res["nx"]))
-            self.vars["grid_ny"].set(str(res["ny"]))
+            # THE TRANSPOSITION, FIXED HERE AND ONLY HERE (2026-08-22).
+            # grid_2d's "n steps X" box steps along world Z — UP THE ROD —
+            # and its "n steps Y" box steps across world Y. The designer
+            # derives one count from the along window and one from the
+            # across band. Until today they were handed over in the order
+            # they were derived, which transposed every automatic grid; see
+            # design_grid's docstring for the proof from run_20260821_165542.
+            # grid_2d is deliberately NOT changed: its convention is what the
+            # collector, the stitcher, the serpentine order and every run
+            # already on disk speak.
+            self.vars["grid_nx"].set(str(res["n_along"]))    # X box = up the rod
+            self.vars["grid_ny"].set(str(res["n_across"]))   # Y box = across it
             self.vars["grid_step"].set(f"{res['step_mm']:.1f}")
             self.vars["pad_dz"].set(f"{res['pad_dz_mm']:.2f}")
             self.vars["pad_dy"].set("0.0")
             self.vars["grid_centered"].set(True)
+            # The point check tested the grid AS THE PAD STEPS IT. Leaving
+            # this off would run a different grid from the one verified.
+            self.vars["grid_pad_frame"].set(True)
             self.refresh()
 
             self.design_lbl.config(
-                text=(f"\u00d8{CYL_D:.0f}x{CYL_L:.0f}: {2*res['nx']+1} x "
-                      f"{2*res['ny']+1} = {res['n_points']} pts at "
-                      f"{res['step_mm']:.1f} mm, pad z {res['pad_dz_mm']:+.1f} "
-                      f"mm\nbound by {res['bound_by']}"),
+                text=(f"\u00d8{CYL_D:.0f}x{CYL_L:.0f}: "
+                      f"{2*res['n_across']+1} across x "
+                      f"{2*res['n_along']+1} along = {res['n_points']} pts "
+                      f"at {res['step_mm']:.1f} mm, pad z "
+                      f"{res['pad_dz_mm']:+.1f} mm\n"
+                      f"bound by {res['bound_by']}; gripper gap "
+                      f"{res['gap_mm']:+.1f} mm"),
                 foreground="#0a6")
             messagebox.showinfo("Design grid", text)
         except Exception:
@@ -2300,8 +2905,45 @@ class CockpitGUI:
                     "recorded in the meta.")
                 return
 
-            self.stitch_status.config(
-                text=f"training pair exported:\n{npz}", foreground="#0a6")
+            msg = f"training pair exported:\n{npz}"
+
+            # ANCHORED PAIRS, only after the pt00 pair succeeded. If pt00 was
+            # refused the run is not fit to train on at all, so writing 40
+            # anchored pairs from it would be manufacturing volume from data
+            # the pipeline just rejected.
+            if self.vars["export_anchors"].get():
+                try:
+                    made, skipped = mod.export_anchor_pairs(
+                        run, include_edge=True, verbose=True)
+                    n_i = sum(1 for _t, k in made if k == "interior")
+                    n_e = len(made) - n_i
+                    msg += (f"\n\nanchored pairs: {len(made)} written "
+                            f"({n_i} interior, {n_e} edge)")
+                    if skipped:
+                        msg += f", {len(skipped)} skipped"
+                    self.stitch_status.config(text=msg, foreground="#0a6")
+                    messagebox.showinfo("Training pairs",
+                        f"{os.path.basename(npz)} written, plus "
+                        f"{len(made)} anchored pairs in Stitched/pairs/\n"
+                        f"   {n_i} interior (measured target on all sides)\n"
+                        f"   {n_e} edge (target lopsided — one side unswept)\n\n"
+                        "These are extra VIEWS of this one sweep, not extra "
+                        "objects. train.py chooses which to use with "
+                        "--anchors none|interior|all, and validates on pt00 "
+                        "pairs only so the settings stay comparable.")
+                except Exception as e:
+                    # The pt00 pair is already on disk and valid; the anchored
+                    # ones are a bonus, so a failure here reports and stops
+                    # rather than discarding what succeeded.
+                    self.stitch_status.config(
+                        text=msg + f"\n(anchored pairs failed: {e})",
+                        foreground="#b00")
+                    messagebox.showwarning("Anchored pairs",
+                        f"training_pair.npz was written and is valid.\n\n"
+                        f"The anchored pairs failed:\n{e}")
+                    return
+
+            self.stitch_status.config(text=msg, foreground="#0a6")
         except Exception:
             messagebox.showerror("Stitching",
                 "Export failed:\n\n" + traceback.format_exc())
