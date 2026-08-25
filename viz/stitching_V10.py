@@ -468,29 +468,6 @@ def _pad_from_ee(pts, tool_z):
     return offs
 
 
-def _load_dead_grasps(run_dir):
-    """{tag: indentation_mm} for grasps the collector flagged as dead.
-
-    Returns {} when there is no ledger, no contact block, or nothing dead —
-    so this is a no-op on every run collected before the flag existed."""
-    import json as _json
-    p = os.path.join(run_dir, "execution_ledger.json")
-    if not os.path.isfile(p):
-        return {}
-    try:
-        with open(p) as f:
-            doc = _json.load(f)
-    except Exception:
-        return {}
-    out = {}
-    for row in doc.get("points", []):
-        c = row.get("contact") or {}
-        if c.get("dead_grasp"):
-            out[str(row.get("tag"))] = float(c.get("deformation_rise_at_hold",
-                                                   0.0)) * 1000.0
-    return out
-
-
 def load_offsets(run_dir):
     """Return ({ptNN: (y_mm, z_mm)}, source_string) in a common frame.
 
@@ -881,36 +858,6 @@ def build_canvas(run_dir, sensor, res_mm=1.0, cal=None, verbose=True,
         oy = offs[key][0] * cal["sign_dy"]
         oz = offs[key][1] * cal["sign_dz"]
         grasps.append((key, (oy, oz), m))
-    # ---- DEAD-GRASP REJECTION (2026-08-25) -------------------------------
-    # A grasp that never touched the object is not "no contact here" — it is
-    # "we failed to look here", and the two are indistinguishable once painted
-    # on the canvas as zeros. Left in, the network would learn the outline of
-    # our failures as if it were a fact about the object.
-    #
-    # The collector now measures pad indentation at every hold and flags
-    # anything under the floor as dead_grasp in execution_ledger.json. This
-    # reads that flag and drops those grasps BEFORE the pose-outlier check, so
-    # the two reasons stay separate in the log: dead = touched nothing,
-    # outlier = touched the wrong place.
-    #
-    # Their cells simply stay unvisited, which the pair mask already handles
-    # correctly. Runs predating the flag have no ledger entry and are
-    # unaffected.
-    _dead = _load_dead_grasps(run_dir)
-    if _dead:
-        _kept = [g for g in grasps if g[0] not in _dead]
-        _lost = [g[0] for g in grasps if g[0] in _dead]
-        if _lost:
-            print(f"[stitch {sensor}] DROPPED {len(_lost)} DEAD grasp(s) "
-                  f"(pads never touched the object): {', '.join(sorted(_lost))}")
-            for k in sorted(_lost):
-                print(f"      {k}: {_dead[k]:.3f} mm of indentation")
-            grasps = _kept
-        if not grasps:
-            raise RuntimeError(
-                f"every {sensor} grasp in this run is flagged dead — nothing "
-                f"to stitch. Check the grid height against the throat limit.")
-
     # ---- outlier rejection: compare recorded offset to COMMANDED offset ----
     gui = _load_gui_grid(run_dir)
     if gui is not None and len(grasps) >= 4:
@@ -1238,7 +1185,6 @@ def stitch_run(run_dir, res_mm=1.0):
            f"SUBTRACT_BASELINE={SUBTRACT_BASELINE}  "
            f"MIRROR_S2_IN_OVERLAY={MIRROR_S2_IN_OVERLAY}  "
            f"OUTLIER_MM={OUTLIER_MM}",
-           f"DEAD_GRASPS_DROPPED={len(_load_dead_grasps(run_dir))}",
            f"pad/pitch : PAD_W={PAD_W} PAD_H={PAD_H} "
            f"PITCH_Y={PITCH_Y} PITCH_Z={PITCH_Z}",
            "-" * 68, ""]

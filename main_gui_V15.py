@@ -735,15 +735,6 @@ class CockpitGUI:
             # reach. Turn OFF while iterating on a config you have already
             # proven, to save that time. Emitted as GRASP_REACH_CHECK.
             "reach_check": tk.BooleanVar(value=True),
-            # Contact-aware closing. OFF by default everywhere: the nine
-            # hand-tuned calibration entries are known good, and a new method
-            # must be compared against them before it replaces them.
-            "contact_close": tk.BooleanVar(value=False),   # kept: run cmds read it
-            # fixed | contact | both. "both" measures the SAME diameter twice
-            # in one sitting, one grasp per mode, into two separate files.
-            "calib_mode": tk.StringVar(value="fixed angle"),
-            "contact_signal": tk.StringVar(value="deformation"),
-            "contact_target": tk.StringVar(value="1.00"),
             # Emitted as GRASP_TOOL_COLLISION. Default ON: the collector's own
             # log says that without it "a plan that sweeps the FINGERS or the
             # PADS through the object will still look safe", and every run so
@@ -1726,46 +1717,10 @@ class CockpitGUI:
         """Calibrate the pad Z-offset for the CURRENT object diameter. Closes the
         gripper on the object (centered) once, measures TOOL_OFFSET_Z, stores it.
         Same copy-run-command + headless-toggle UX as the Collection tab."""
-        # SCROLLABLE (2026-08-25), same treatment the Stitch tab got: the
-        # closing-mode block pushed the buttons and the result box below the
-        # window edge with no way to reach them. Everything below still grids
-        # into `frm`; `frm` simply lives inside a Canvas now.
-        _outer = ttk.Frame(self.tab_calib)
-        _outer.grid(row=0, column=0, sticky="nsew")
+        frm = ttk.Frame(self.tab_calib, padding=10)
+        frm.grid(row=0, column=0, sticky="ns")
         self.tab_calib.columnconfigure(1, weight=1)
         self.tab_calib.rowconfigure(0, weight=1)
-        _outer.rowconfigure(0, weight=1)
-
-        # Width is set from the CONTENT once it is built (see the end of this
-        # method): a fixed width clipped the buttons and the wrapped help text
-        # off the right-hand edge, with no horizontal scrollbar to reach them.
-        _cv = tk.Canvas(_outer, highlightthickness=0)
-        _cv.grid(row=0, column=0, sticky="nsew")
-        _sb = ttk.Scrollbar(_outer, orient="vertical", command=_cv.yview)
-        _sb.grid(row=0, column=1, sticky="ns")
-        _cv.configure(yscrollcommand=_sb.set)
-
-        frm = ttk.Frame(_cv, padding=10)
-        _win = _cv.create_window((0, 0), window=frm, anchor="nw")
-        frm.bind("<Configure>",
-                 lambda e: _cv.configure(scrollregion=_cv.bbox("all")))
-        _cv.bind("<Configure>",
-                 lambda e: _cv.itemconfigure(_win, width=e.width))
-
-        def _cwheel(ev):
-            if getattr(ev, "num", None) == 4:
-                _cv.yview_scroll(-1, "units")
-            elif getattr(ev, "num", None) == 5:
-                _cv.yview_scroll(1, "units")
-            else:
-                _cv.yview_scroll(int(-1 * (ev.delta / 120)), "units")
-        for _w in (_cv, frm):
-            _w.bind("<Enter>", lambda e: (_cv.bind_all("<MouseWheel>", _cwheel),
-                                          _cv.bind_all("<Button-4>", _cwheel),
-                                          _cv.bind_all("<Button-5>", _cwheel)))
-            _w.bind("<Leave>", lambda e: (_cv.unbind_all("<MouseWheel>"),
-                                          _cv.unbind_all("<Button-4>"),
-                                          _cv.unbind_all("<Button-5>")))
 
         r = 0
         ttk.Label(frm, text="CALIBRATE pad Z-offset",
@@ -1803,35 +1758,6 @@ class CockpitGUI:
                   foreground="#888", wraplength=250).grid(
             row=r, column=0, columnspan=2, sticky="w"); r += 1
 
-        # ---- CONTACT-AWARE CLOSING ------------------------------------
-        ttk.Separator(frm, orient="horizontal").grid(
-            row=r, column=0, columnspan=2, sticky="ew", pady=8); r += 1
-        ttk.Label(frm, text="CLOSING MODE",
-                  font=("", 9, "bold")).grid(row=r, column=0, columnspan=2,
-                                             sticky="w"); r += 1
-        ttk.Label(frm, text="mode").grid(row=r, column=0, sticky="e")
-        _md = ttk.Combobox(frm, textvariable=self.vars["calib_mode"],
-                           values=["fixed angle", "contact-aware",
-                                   "both (compare)"],
-                           state="readonly", width=18)
-        _md.grid(row=r, column=1, sticky="w")
-        _md.bind("<<ComboboxSelected>>", lambda _e: self._sync_calib_mode()); r += 1
-        ttk.Label(frm, text="signal").grid(row=r, column=0, sticky="e")
-        _sig = ttk.Combobox(frm, textvariable=self.vars["contact_signal"],
-                            values=["deformation", "tactile (not available)"],
-                            state="readonly", width=18)
-        _sig.grid(row=r, column=1, sticky="w")
-        _sig.bind("<<ComboboxSelected>>",
-                  lambda _e: self._update_contact_hint()); r += 1
-        ttk.Label(frm, text="target (mm)").grid(row=r, column=0, sticky="e")
-        e = ttk.Entry(frm, textvariable=self.vars["contact_target"], width=10)
-        e.grid(row=r, column=1, sticky="w")
-        e.bind("<Return>", lambda _e: self._update_contact_hint()); r += 1
-        self.contact_lbl = ttk.Label(frm, text="", foreground="#555",
-                                     wraplength=250, justify="left")
-        self.contact_lbl.grid(row=r, column=0, columnspan=2, sticky="w",
-                              pady=(2, 0)); r += 1
-
         ttk.Separator(frm, orient="horizontal").grid(
             row=r, column=0, columnspan=2, sticky="ew", pady=8); r += 1
         ttk.Checkbutton(frm, text="Run headless (no Isaac window)",
@@ -1863,10 +1789,6 @@ class CockpitGUI:
         self.ax_calib = self.fig_calib.add_subplot(1, 1, 1)
         self.canvas_calib = FigureCanvasTkAgg(self.fig_calib, master=self.tab_calib)
         self.canvas_calib.get_tk_widget().grid(row=0, column=1, sticky="nsew")
-        self._update_contact_hint()
-        # size the scroll panel to whatever the widgets actually need
-        frm.update_idletasks()
-        _cv.configure(width=frm.winfo_reqwidth() + 6)
         self.refresh_calib()
 
     def refresh_calib(self):
@@ -2005,81 +1927,6 @@ class CockpitGUI:
                      f"Use {est:.3f}",
                 foreground="#b00")
 
-    def _sync_calib_mode(self):
-        """Keep the legacy contact_close flag in step with the 3-way mode."""
-        m = self.vars["calib_mode"].get()
-        self.vars["contact_close"].set(m.startswith("contact"))
-        self._update_contact_hint()
-
-    def _update_contact_hint(self):
-        """Say plainly what the chosen mode will do, and what it will not."""
-        mode = self.vars["calib_mode"].get()
-        sig = self.vars["contact_signal"].get()
-        if mode.startswith("both"):
-            self.contact_lbl.config(
-                text=("Two grasps on this diameter, back to back: one at the "
-                      "fixed close_rad above, one closing to the target. "
-                      "Writes pad_offset_calibration_fixed.json and "
-                      "_contact.json.\n\nThe existing hand-tuned file is not "
-                      "touched — and it should not be the comparison anyway: "
-                      "it was measured 3-20 August, so differences against it "
-                      "mix 'the method changed' with 'three weeks passed'. "
-                      "Two grasps taken today separate the two.\n\nThe "
-                      "command box will show TWO commands; run them in order."),
-                foreground="#06a")
-            return
-        on = mode.startswith("contact")
-        if not on:
-            self.contact_lbl.config(
-                text=("Fixed angle: closes to close_rad above and stores the "
-                      "offset it lands at. This is how all nine current "
-                      "entries were made."),
-                foreground="#555")
-            return
-        if sig.startswith("tactile"):
-            self.contact_lbl.config(
-                text=("TACTILE IS NOT AVAILABLE. The collector talks to the "
-                      "TSF-85 extension through carb settings and only writes "
-                      "them, so the CNN output cannot be read while the "
-                      "fingers are moving. Choose deformation."),
-                foreground="#a00")
-            return
-        try:
-            tgt = float(self.vars["contact_target"].get())
-        except ValueError:
-            self.contact_lbl.config(text="target must be a number.",
-                                    foreground="#a00"); return
-        self.contact_lbl.config(
-            text=(f"Closes until the pad is squashed by {tgt:.2f} mm, then "
-                  f"stores THAT angle and offset. Measured after removing the "
-                  f"pad's rigid motion, so it reads 0 at rest and only rises "
-                  f"on real contact.\n\nMEASURED on \u00d826 at close_rad "
-                  f"0.557 (tactile peak 15367, firm): 0.000 mm at 0.46 rad, "
-                  f"0.3 mm at 0.51, 1.4 mm at full close. So 1.0 mm is a firm "
-                  f"grasp that stops slightly early — which is the point, "
-                  f"since the same indentation on every diameter is what makes "
-                  f"the squeeze consistent.\n\nclose_rad above stays a hard "
-                  f"ceiling: it can only stop earlier, never squeeze harder. "
-                  f"Writes pad_offset_calibration_contact.json; the hand-tuned "
-                  f"file is untouched."),
-            foreground="#06a")
-
-    def _contact_env(self):
-        """The env lines for contact-aware closing, or '' when it is off."""
-        if not self.vars["contact_close"].get():
-            return ""
-        sig = self.vars["contact_signal"].get()
-        if sig.startswith("tactile"):
-            return ""      # not available; _update_contact_hint says why
-        try:
-            tgt = float(self.vars["contact_target"].get())
-        except ValueError:
-            return ""
-        # the GUI field is in mm; the collector works in stage units (m)
-        return (f'GRASP_CONTACT_CLOSE="1" \\\n'
-                f'GRASP_CONTACT_SIGNAL="deformation" \\\n'
-                f'GRASP_CONTACT_TARGET="{tgt/1000.0:g}" \\\n')
-
     def save_and_show_calib_cmd(self):
         cfg = self.build_calib_config()
         if cfg is None:
@@ -2096,56 +1943,16 @@ class CockpitGUI:
                 messagebox.showerror("Calibrate",
                                      "close_rad must be a number, or blank.")
                 return
-        def _one(contact, suffix):
-            """One calibrate invocation. contact=None keeps the mode's own
-            setting; suffix='' writes the main file."""
-            env = ""
-            if contact:
-                try:
-                    tgt = float(self.vars["contact_target"].get())
-                except ValueError:
-                    tgt = 1.0
-                env = (f'GRASP_CONTACT_CLOSE="1" \\\n'
-                       f'GRASP_CONTACT_SIGNAL="deformation" \\\n'
-                       f'GRASP_CONTACT_TARGET="{tgt/1000.0:g}" \\\n')
-            return (
-                f"cd {EXAMPLES_DIR} && \\\n"
-                f'GRASP_OUTPUT_DIR="$HOME/Paper3_Simulation/Data/gui_run" \\\n'
-                f'GRASP_BASENAME="calib" \\\n'
-                f'GRASP_HEADLESS="{headless}" \\\n'
-                f'GRASP_CALIBRATE="1" \\\n'
-                + env
-                + (f'GRASP_CAL_SUFFIX="{suffix}" \\\n' if suffix else "")
-                + (f'GRASP_CLOSE_RAD="{_crad}" \\\n' if _crad else "")
-                + f"{ISAAC_PY} {COLLECT_PY} \\\n"
-                f"  --config {CALIB_CONFIG_JSON}")
-
-        _mode = self.vars["calib_mode"].get()
-        if _mode.startswith("both"):
-            # ONE launch, ONE descent, TWO closes (2026-08-25). The second
-            # point is a pad-to-pad move of zero distance, so the arm never
-            # lifts between them: pt00 closes to the fixed angle, pt01 closes
-            # to the contact target, at the same pose in the same session.
-            # Everything except the closing is held fixed, which is the whole
-            # point of comparing them.
-            try:
-                tgt = float(self.vars["contact_target"].get())
-            except ValueError:
-                tgt = 1.0
-            cmd = (
-                f"cd {EXAMPLES_DIR} && \\\n"
-                f'GRASP_OUTPUT_DIR="$HOME/Paper3_Simulation/Data/gui_run" \\\n'
-                f'GRASP_BASENAME="calib" \\\n'
-                f'GRASP_HEADLESS="{headless}" \\\n'
-                f'GRASP_CALIBRATE="1" \\\n'
-                f'GRASP_CALIB_BOTH="1" \\\n'
-                f'GRASP_CONTACT_SIGNAL="deformation" \\\n'
-                f'GRASP_CONTACT_TARGET="{tgt/1000.0:g}" \\\n'
-                + (f'GRASP_CLOSE_RAD="{_crad}" \\\n' if _crad else "")
-                + f"{ISAAC_PY} {COLLECT_PY} \\\n"
-                f"  --config {CALIB_CONFIG_JSON}")
-        else:
-            cmd = _one(_mode.startswith("contact"), "")
+        cmd = (
+            f"cd {EXAMPLES_DIR} && \\\n"
+            f'GRASP_OUTPUT_DIR="$HOME/Paper3_Simulation/Data/gui_run" \\\n'
+            f'GRASP_BASENAME="calib" \\\n'
+            f'GRASP_HEADLESS="{headless}" \\\n'
+            f'GRASP_CALIBRATE="1" \\\n'
+            + (f'GRASP_CLOSE_RAD="{_crad}" \\\n' if _crad else "")
+            + f"{ISAAC_PY} {COLLECT_PY} \\\n"
+            f"  --config {CALIB_CONFIG_JSON}"
+        )
         win = tk.Toplevel(self.root)
         win.title("Calibrate command — copy into a terminal")
         tk.Label(win, justify="left",

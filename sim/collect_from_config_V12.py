@@ -84,36 +84,6 @@ CAL_DEFAULT_OFFST = 0.15     # m, provisional offset used ONLY during calibratio
 CAL_FILE = os.path.expanduser("~/Paper3_Simulation/Data/pad_offset_calibration.json")
 OBJ_DIAM_MM = float(CONFIG["object"].get("diameter_mm", 0.0))
 CALIBRATE   = os.environ.get("GRASP_CALIBRATE", "0") == "1"
-# Contact-aware closing. OFF by default, so every existing command is unchanged.
-CONTACT_CLOSE   = os.environ.get("GRASP_CONTACT_CLOSE", "0") == "1"
-CONTACT_SIGNAL  = os.environ.get("GRASP_CONTACT_SIGNAL", "deformation")
-# 1.0 mm of indentation, in stage units. Chosen from the measured curve above,
-# not guessed: a full close on D26 reaches 1.4 mm, so 1.0 stops slightly early
-# — which is the point, since the same indentation on every diameter is what
-# makes the squeeze consistent.
-CONTACT_TARGET  = float(os.environ.get("GRASP_CONTACT_TARGET", "0.0010"))
-# Where a calibrate run writes. Empty = the main file (unchanged behaviour).
-# The GUI's "both" mode measures the SAME diameter twice in one sitting, once
-# per closing mode, and gives each its own suffix -- so the hand-tuned file
-# measured on 3-20 August is never overwritten, and the comparison is between
-# two grasps taken today rather than between today and three weeks ago.
-CAL_SUFFIX = os.environ.get("GRASP_CAL_SUFFIX", "")
-# Calibrate BOTH closing modes in one session, one descent, two closes.
-CALIB_BOTH = os.environ.get("GRASP_CALIB_BOTH", "0") == "1"
-# Below this, at the hold, the pads did not touch the object. 0.05 is far under
-# a real grasp (~1.15 on a firm D60) and far over the 0.000127 the log shows
-# while the fingers are merely moving, so it separates the two cleanly.
-# MEASURED 2026-08-25, D26, close_rad 0.557, tactile peak 15367 (firm):
-#   frame 50/60  angle 0.462  rise 0.0000
-#   frame 55/60  angle 0.508  rise 0.0003
-#   frame 60/60  angle 0.556  rise 0.0014     <- a firm grasp
-# The units are STAGE UNITS (metres), so 0.0014 is 1.4 mm of pad indentation
-# — which agrees with the compliance model's ~1.16 mm for D26 and with the
-# 2.09 mm the band-width fit gave on D60. A rise of 0.0002 (0.2 mm) is well
-# clear of the 0.0000 the pad reads while merely moving, and far below a real
-# grasp, so it separates dead from firm with an order of magnitude either way.
-DEAD_GRASP_FLOOR = float(os.environ.get("GRASP_DEAD_FLOOR", "0.0002"))
-_CONTACT_LOG = {}
 
 def _load_cal():
     try:
@@ -139,17 +109,6 @@ elif CALIBRATE:
         _cz_mm = 0.0
     # ONE grasp: Y centered (so the pads meet the true diameter), Z as chosen
     CONFIG["points"] = [{"index": 0, "pad_offset_y_mm": 0.0, "pad_offset_z_mm": _cz_mm}]
-    # BOTH MODES IN ONE SITTING (2026-08-25). Two identical points: the second
-    # is a pad-to-pad move of zero distance, so the arm descends ONCE and the
-    # gripper simply closes twice at the same pose -- pt00 to the fixed angle,
-    # pt01 until the contact target. That removes the relaunch and the ascent
-    # between them, and with them every source of difference except the closing
-    # itself, which is the only thing the comparison is about.
-    if CALIB_BOTH:
-        CONFIG["points"].append({"index": 1, "pad_offset_y_mm": 0.0,
-                                 "pad_offset_z_mm": _cz_mm})
-        print(f"[cal] BOTH modes: pt00 = fixed angle, pt01 = contact-aware, "
-              f"same pose, one descent")
     print(f"[cal] calibrate grasp: Y=0 (centered), Z offset={_cz_mm:+.1f} mm")
 elif _diam_key in _CAL:
     TOOL_OFFSET_Z = float(_CAL[_diam_key]["TOOL_OFFSET_Z"])
@@ -1864,30 +1823,12 @@ def write_execution_ledger(out_dir):
                "executed": (ex or {}).get("ok"),
                "exec_stage": (ex or {}).get("stage"),
                "outcome": outcome}
-        # What the pads actually felt. Without this a grasp that touched
-        # nothing is indistinguishable from a good one until the map is
-        # stitched, which is exactly how the D60 jam survived a whole sweep.
-        _c = _CONTACT_LOG.get(f"pt{idx:02d}")
-        if _c:
-            row["contact"] = _c
         _att = EXEC_ATTEMPTS.get(idx, [])
         if len(_att) > 1:                 # only when something was retried
             row["attempts"] = _att
         rows.append(row)
-    _dead = sorted(t for t, c in _CONTACT_LOG.items() if c.get("dead_grasp"))
-    _missed = sorted(t for t, c in _CONTACT_LOG.items()
-                     if c.get("contact_target_reached") is False)
     doc = {"generated": _stamp, "config": _args.config,
            "grasp_rot_deg": float(ROT_DEG),
-           "closing": {
-               "mode": "contact" if CONTACT_CLOSE else "fixed_angle",
-               "signal": CONTACT_SIGNAL if CONTACT_CLOSE else None,
-               "target": CONTACT_TARGET if CONTACT_CLOSE else None,
-               "dead_grasp_floor": DEAD_GRASP_FLOOR,
-               "n_graded": len(_CONTACT_LOG),
-               "n_dead": len(_dead), "dead_points": _dead,
-               "n_target_not_reached": len(_missed),
-               "target_not_reached_points": _missed},
            "use_collision_world": bool(USE_COLLISION_WORLD),
            "collision_model": COLLISION_MODEL_INFO,
            "robot_yaml": os.path.basename(CUROBO_ROBOT_YAML),
@@ -2249,158 +2190,6 @@ def _watch_close():
         except Exception: pass
     _WATCH["on"] = False; _WATCH["f"] = None
 
-# ---- CONTACT-AWARE CLOSING (2026-08-24) ---------------------------------
-# Until now every grasp closed to a FIXED close_rad read from the calibration
-# file: an angle picked by hand per diameter, with a D26 fallback for any size
-# not in the file, and no check whatsoever that contact happened. That is the
-# guesswork this removes, and it is also how a dead grasp (D60 at pad_dz
-# +29.64, peak 4 counts) survived a whole sweep unnoticed.
-#
-# WHY DEFORMATION AND NOT TACTILE COUNTS. The collector runs INSIDE Isaac, in
-# the same process as the sensor, so a closed loop needs no stream, no server
-# and no ROS2 -- but it talks to the TSF-85 extension through carb settings and
-# only WRITES them, so the CNN's output is not readable here; every tactile
-# number arrives later via CSV. The pad's own deformation IS readable, straight
-# from USD, and it is better on the merits: physical rather than inferred,
-# independent of both the calibration file and the CNN, and the same idea
-# transfers to a real sensor where the object's diameter is unknown.
-#
-# UNITS. This returns the extension's own quantity, max|sim - rest| over the
-# deformable mesh nodes, so it is directly comparable with the
-# "[TSF-85][DIAG] pos_attr=points max|sim-rest|=..." lines in the run log. On a
-# firm D60 grasp that log reads ~1.15. Treat it as "about mm" but compare it
-# against itself, not against a ruler.
-_DEFORM_CACHE = {}
-
-
-def _deform_prims():
-    """Resolve the two deformable meshes once. Same paths the extension logs."""
-    if _DEFORM_CACHE:
-        return _DEFORM_CACHE
-    for tag, root in (("s1", SENSOR_ROOT_RIGHT), ("s2", SENSOR_ROOT_LEFT)):
-        found = None
-        try:
-            base = stage.GetPrimAtPath(root)
-            if base and base.IsValid():
-                for pr in Usd.PrimRange(base):
-                    if pr.GetName() == "simulation_mesh":
-                        found = pr; break
-            if found is None:      # the extension resolves a doubled segment
-                alt = root.replace("/World/robot_gripper_adapter_sensor/",
-                                   "/World/robot_gripper_adapter_sensor/"
-                                   "robot_gripper_adapter_sensor/", 1)
-                base = stage.GetPrimAtPath(alt)
-                if base and base.IsValid():
-                    for pr in Usd.PrimRange(base):
-                        if pr.GetName() == "simulation_mesh":
-                            found = pr; break
-        except Exception:
-            found = None
-        _DEFORM_CACHE[tag] = found
-        print(f"[contact] {tag} deformable mesh: "
-              f"{found.GetPath() if found is not None else 'NOT FOUND'}")
-    return _DEFORM_CACHE
-
-
-def read_deformation(subsample=4):
-    """TRUE deformation of both pads: the residual after removing rigid motion.
-
-    WHY NOT max|sim - rest| DIRECTLY (2026-08-25). That is what the extension
-    prints, and it reads ~1.15 with nothing touching the pad. The reason is
-    that `points` and `omniphysics:restShapePoints` are not in the same frame,
-    so their difference is dominated by WHERE THE PAD IS, not by how squashed
-    it is. Measured on a firm D26 grasp (tactile peak 14339, so contact was
-    definitely real): closing moved s1 by +0.0285 and s2 by -0.0285 -- equal
-    and opposite, because the two pads rotate in mirror directions as the
-    fingers come together. That is rigid motion, not deformation, and the
-    contact was invisible underneath it.
-
-    So: fit the best rigid transform (Kabsch, via SVD of the 3x3 covariance)
-    that maps rest onto sim, apply it, and measure what is LEFT. A rigid pad
-    leaves nothing; a squashed one leaves the squash. At rest this reads ~0
-    instead of ~1.15, which is the whole point.
-
-    Returns (worst, {s1:..., s2:...}) in stage units. MAX of the two pads, not
-    the mean: one pad touching is enough to stop closing, which is the
-    conservative direction."""
-    out = {}
-    for tag, prim in _deform_prims().items():
-        v = 0.0
-        if prim is not None:
-            try:
-                sim = prim.GetAttribute("points").Get()
-                rest = prim.GetAttribute("omniphysics:restShapePoints").Get()
-                if sim is not None and rest is not None and len(sim) == len(rest):
-                    A = np.asarray(rest, float)[::subsample]   # source
-                    B = np.asarray(sim, float)[::subsample]    # target
-                    if len(A) >= 4:
-                        ca, cb = A.mean(0), B.mean(0)
-                        H = (A - ca).T @ (B - cb)
-                        U, _S, Vt = np.linalg.svd(H)
-                        d = np.sign(np.linalg.det(Vt.T @ U.T))
-                        R = Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
-                        resid = B - ((A - ca) @ R.T + cb)
-                        v = float(np.linalg.norm(resid, axis=1).max())
-            except Exception:
-                v = 0.0
-        out[tag] = v
-    return (max(out.values()) if out else 0.0), out
-
-
-def ramp_gripper_to_contact(arm_q, target, n_frames, contact_target,
-                            label="close", baseline=0.0):
-    """Close until the pads deform contact_target ABOVE BASELINE.
-
-    THE BASELINE IS NOT OPTIONAL (2026-08-25). The deformable pad already reads
-    max|sim-rest| ~= 1.15 at rest, before anything touches it -- the extension
-    prints exactly that during startup on every run. The first version of this
-    compared the RAW value against the target, so a target of 1.0 was already
-    exceeded before the fingers moved: it stopped after 1 frame of 60 at a
-    finger angle of 0.0088 rad, the gripper visibly never closed, and only the
-    calibration contact gate (tactile peak 253 < 1000) caught it. Same lesson
-    the tactile path learned long ago, which is why SUBTRACT_BASELINE exists.
-
-    The fixed angle stays as a HARD CEILING. This never squeezes harder than
-    the calibrated close_rad would have -- it only ever stops EARLIER. So the
-    worst case of a bad signal is the behaviour we already had, not a crushed
-    object.
-
-    Returns (stopped_angle, achieved_deformation, reached_target)."""
-    cur_g = float(robot.get_joint_positions()[gi[0]])
-    print(f"[{label}] closing: need {contact_target*1000:.3f} mm of pad "
-          f"indentation, ceiling {target:.4f} rad")
-    best, per = 0.0, {}
-    for k in range(n_frames):
-        alpha = (k + 1) / n_frames
-        apply_arm_and_grip(arm_q, grip_val=cur_g + alpha * (target - cur_g))
-        world.step(render=True)
-        _watch("ramp", k)
-        raw, per = read_deformation()
-        rise = raw - baseline
-        best = max(best, rise)
-        # A TRACE, not decoration. Until a firm grasp has been observed we do
-        # not know what rise to ask for, and this log line is how that number
-        # gets found: run once with an unreachably high target and read the
-        # curve off the output.
-        if (k + 1) % 5 == 0 or k == 0:
-            q_now = float(robot.get_joint_positions()[gi[0]])
-            print(f"[{label}]   frame {k+1:3d}/{n_frames}  angle {q_now:.4f}  "
-                  f"rise {rise*1000:+7.3f} mm  "
-                  f"(s1 {per.get('s1', 0)*1000:.3f} "
-                  f"s2 {per.get('s2', 0)*1000:.3f} mm)")
-        if rise >= contact_target:
-            q = float(robot.get_joint_positions()[gi[0]])
-            print(f"[{label}] CONTACT: indentation {rise*1000:.3f} mm >= "
-                  f"{contact_target*1000:.3f} mm after {k+1}/{n_frames} "
-                  f"frames, finger angle {q:.4f} rad (ceiling {target:.4f})")
-            return q, rise, True
-    q = float(robot.get_joint_positions()[gi[0]])
-    print(f"[{label}] !! TARGET NEVER REACHED: best {best*1000:.3f} mm vs "
-          f"{contact_target*1000:.3f} mm. Closed to the ceiling {q:.4f} rad — "
-          f"i.e. exactly what the fixed-angle mode would have done.")
-    return q, best, False
-
-
 def ramp_gripper(arm_q, target, n_frames):
     cur_g = float(robot.get_joint_positions()[gi[0]])
     for k in range(n_frames):
@@ -2717,9 +2506,7 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
     _GRIP_ROOT = ("/World/robot_gripper_adapter_sensor/robot_gripper_adapter_sensor/"
                   "Robotiq_2F_85_adapter_fixed_v_sibling__1_/Robotiq_2F_85_modified/"
                   "Robotiq_2F_85")
-    # In "both" mode every point must be probed: each close produces its own
-    # pad pose, and that pose IS the offset we are here to measure.
-    PROBE = (tag == "pt00") or (CALIBRATE and CALIB_BOTH)
+    PROBE = (tag == "pt00")
 
     # ---- find the REAL sensor bodies (the 'Case' rigid prims) ---------------
     # ".../TSF_85_right/TSF_85" is an EMPTY Xform wrapper -> it never moves.
@@ -2771,53 +2558,9 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
     _tsf.set("/exts/TSF_85_Ext/record_active", True)
     _progress(f"{tag} CLOSE start")
     print(f"[{tag}] [RECORD ON] close -> hold -> open ...")
-    # Baseline: the pads are at the grasp pose but still OPEN, so whatever
-    # deformation they read now is rest state, not contact.
-    _base_def, _base_per = read_deformation()
-    print(f"[{tag}] indentation baseline (open, before closing): "
-          f"{_base_def*1000:.4f} mm  (should be ~0)")
-    # In "both" mode the mode is chosen per point: pt00 fixed, pt01 contact.
-    _use_contact = (tag == "pt01") if (CALIBRATE and CALIB_BOTH) else CONTACT_CLOSE
-    if _use_contact:
-        _q_stop, _got, _hit = ramp_gripper_to_contact(
-            hold_qg, CLOSE_RAD, GRIPPER_RAMP_FRAMES, CONTACT_TARGET, tag,
-            baseline=_base_def)
-    else:
-        ramp_gripper(hold_qg, CLOSE_RAD, GRIPPER_RAMP_FRAMES)
-        _q_stop, _hit = float(robot.get_joint_positions()[gi[0]]), None
-        _got = None
+    ramp_gripper(hold_qg, CLOSE_RAD, GRIPPER_RAMP_FRAMES)
     _progress(f"{tag} CLOSE done, holding")
     hold_for(hold_qg, WAIT_HOLD_SECONDS, _phase="hold_closed")
-
-    # ---- DEAD-GRASP DETECTION -------------------------------------------
-    # Read the deformation AT THE HOLD, whichever closing mode was used. This
-    # is cheap and it is the thing that makes an unattended batch safe: a
-    # grasp that touched nothing is recorded as it happens instead of being
-    # discovered days later in a stitched map. It never aborts the run -- one
-    # bad point must not cost the other ninety-nine.
-    _hold_raw, _hold_per = read_deformation()
-    _hold_def = _hold_raw - _base_def          # RISE above rest, see above
-    _dead = _hold_def < DEAD_GRASP_FLOOR
-    _CONTACT_LOG[tag] = {
-        "closing_mode": "contact" if _use_contact else "fixed_angle",
-        "close_rad_ceiling": float(CLOSE_RAD),
-        "close_rad_stopped": round(float(_q_stop), 5),
-        "contact_target": float(CONTACT_TARGET) if _use_contact else None,
-        "contact_at_close": (round(float(_got), 5) if _got is not None else None),
-        "contact_target_reached": _hit,
-        "deformation_baseline": round(float(_base_def), 5),
-        "deformation_raw_at_hold": round(float(_hold_raw), 5),
-        "deformation_rise_at_hold": round(float(_hold_def), 5),
-        "deformation_raw_s1": round(float(_hold_per.get("s1", 0.0)), 5),
-        "deformation_raw_s2": round(float(_hold_per.get("s2", 0.0)), 5),
-        "dead_grasp": bool(_dead),
-    }
-    if _dead:
-        print(f"[{tag}] !! DEAD GRASP: only {_hold_def*1000:.3f} mm of pad "
-              f"indentation, under the floor {DEAD_GRASP_FLOOR*1000:.3f} mm. "
-              f"Recorded and continuing.")
-    else:
-        print(f"[{tag}] contact OK: {_hold_def*1000:.3f} mm of pad indentation")
     if PROBE:
         _probe["closed_grip"] = _probe_all(_probe_prims)  # AFTER closing (has the swing)
         _probe["finger_joint_rad"] = (float(robot.get_joint_positions()[gi[0]])
@@ -2966,12 +2709,9 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
             _probe["offset_solver_error"] = str(_oe)
 
         try:
-            _probe_name = (f"pad_truth_probe_{tag}.json"
-                           if (CALIBRATE and CALIB_BOTH) else
-                           "pad_truth_probe.json")
-            with open(os.path.join(OUTPUT_DIR, _probe_name), "w") as _pf:
+            with open(os.path.join(OUTPUT_DIR, "pad_truth_probe.json"), "w") as _pf:
                 json.dump(_probe, _pf, indent=2)
-            print(f"[{tag}] {_probe_name} written")
+            print(f"[{tag}] pad_truth_probe.json written")
         except Exception as _pe:
             print(f"[{tag}] pad_truth_probe write FAILED ({_pe})")
     _progress(f"{tag} OPEN start")
@@ -3175,10 +2915,9 @@ try:
     # at a CLEAN (collision-free) grasp, instead of the C_ANCHOR guess.
     # If the Case is not live (older scene), fall back to the old formula so
     # calibration never silently fails.
-    def _calibrate_store(_probe_file, _sfx_in, _tag_in):
-        global EXIT_CODE
+    if CALIBRATE:
         try:
-            with open(os.path.join(OUTPUT_DIR, _probe_file)) as _pf:
+            with open(os.path.join(OUTPUT_DIR, "pad_truth_probe.json")) as _pf:
                 _pt = _json.load(_pf)
             _ee = np.array(_pt["ee_world_m"], dtype=float)
 
@@ -3281,9 +3020,6 @@ try:
                 _off_case  = round(float(-_off_world[2]), 5)               # case origin
                 # shift UP to the pad CENTRE (Case origin is at the pad's end):
                 _offset    = round(_off_case + PAD_CENTER_ABOVE_CASE_M, 5)  # pad CENTRE
-                # calibrate mode runs exactly one grasp, so there is at most
-                # one contact record and no ambiguity about which it is
-                _cc = _CONTACT_LOG.get(_tag_in)
                 _CAL[_diam_key] = {
                     "diameter_mm": OBJ_DIAM_MM,
                     "method": "measured_live_pad",
@@ -3296,16 +3032,10 @@ try:
                     "pad_right_closed_world_m": [round(float(v), 5) for v in _pr],
                     "pad_left_closed_world_m":  [round(float(v), 5) for v in _pl],
                     "ee_world_m": [round(float(v), 5) for v in _ee],
-                    # In contact-aware mode the stored close_rad is the angle
-                    # the fingers actually STOPPED at, not the ceiling they
-                    # were aiming for -- that stopped angle is the whole point,
-                    # and it is what a later fixed-angle run must reproduce.
-                    "close_rad": (round(float(_cc["close_rad_stopped"]), 4)
-                                  if ((_cc or {}).get("closing_mode") == "contact" and _cc) else CLOSE_RAD),
+                    "close_rad": CLOSE_RAD,
                     "finger_joint_rad": _pt.get("finger_joint_rad"),
                     "tactile_peak_sum": round(float(_peak), 1),
                     "measured_at": _stamp,
-                    **({"contact_close": _cc} if ((_cc or {}).get("closing_mode") == "contact" and _cc) else {}),
                 }
                 print(f"\n[cal] CALIBRATED (measured live pad) diameter {OBJ_DIAM_MM} mm")
                 print(f"[cal]   case-origin offset = {_off_case}  + pad-centre shift "
@@ -3326,101 +3056,15 @@ try:
                 print(f"\n[cal] Case NOT live -> FALLBACK formula. "
                       f"diameter {OBJ_DIAM_MM} mm -> TOOL_OFFSET_Z = {_offset}")
 
-            # CONTACT-AWARE CALIBRATION WRITES ITS OWN FILE (2026-08-24).
-            # The nine hand-tuned entries in pad_offset_calibration.json are
-            # known good and everything downstream reads them, so a new method
-            # must not overwrite them before it has been compared against them.
-            # It writes pad_offset_calibration_contact.json instead; diff the
-            # two, and only then decide which one collection should use.
-            _sfx = _sfx_in
-            _out_file = (CAL_FILE.replace(".json", f"{_sfx}.json")
-                         if _sfx else CAL_FILE)
-            if _sfx:
-                try:
-                    with open(_out_file) as _pf:
-                        _prev = _json.load(_pf)
-                    _prev.update({_diam_key: _CAL[_diam_key]})
-                    _CAL_OUT = _prev
-                except Exception:
-                    _CAL_OUT = {_diam_key: _CAL[_diam_key]}
-            else:
-                _CAL_OUT = _CAL
-            os.makedirs(os.path.dirname(_out_file), exist_ok=True)
-            with open(_out_file, "w") as _cf:
-                _json.dump(_CAL_OUT, _cf, indent=2)
-            print(f"[cal] stored in {_out_file}")
-            if _sfx:
-                _old = _CAL.get(_diam_key + "__none")
-                try:
-                    with open(CAL_FILE) as _of:
-                        _old = _json.load(_of).get(_diam_key)
-                except Exception:
-                    _old = None
-                if _old:
-                    print(f"[cal] COMPARE with the hand-tuned entry:")
-                    print(f"[cal]   close_rad      {_old.get('close_rad')} "
-                          f"-> {_CAL[_diam_key].get('close_rad')}")
-                    print(f"[cal]   TOOL_OFFSET_Z  {_old.get('TOOL_OFFSET_Z')} "
-                          f"-> {_CAL[_diam_key].get('TOOL_OFFSET_Z')}")
-                    print(f"[cal]   peak sum       {_old.get('tactile_peak_sum')} "
-                          f"-> {_CAL[_diam_key].get('tactile_peak_sum')}")
-                else:
-                    print(f"[cal] no hand-tuned entry for {_diam_key} to compare against.")
+            os.makedirs(os.path.dirname(CAL_FILE), exist_ok=True)
+            with open(CAL_FILE, "w") as _cf:
+                _json.dump(_CAL, _cf, indent=2)
+            print(f"[cal] stored in {CAL_FILE}")
         except _CalNoContact:
             pass    # already printed the reason; nothing stored, EXIT_CODE set
         except Exception as _ce:
             print(f"[cal] CALIBRATION FAILED to compute/store: {_ce}")
             EXIT_CODE = 3
-
-    def _summarise_both():
-        """One table, both methods, measured minutes apart at the same pose.
-
-        This is the comparison the mode exists for: differences here are the
-        CLOSING, with the session, the scene and the descent held fixed."""
-        rows = []
-        for _sfx_c, _lbl in (("_fixed", "fixed angle"), ("_contact", "contact-aware")):
-            try:
-                with open(CAL_FILE.replace(".json", f"{_sfx_c}.json")) as _f:
-                    rows.append((_lbl, _json.load(_f).get(_diam_key, {})))
-            except Exception:
-                rows.append((_lbl, {}))
-        print(f"\n[cal] ================ BOTH METHODS, D{OBJ_DIAM_MM} "
-              f"================")
-        print(f"[cal] {'':16s} {'close_rad':>10s} {'TOOL_OFFSET_Z':>14s} "
-              f"{'peak sum':>10s} {'indent mm':>10s}")
-        for _lbl, e in rows:
-            _ind = ((e.get("contact_close") or {}).get("deformation_rise_at_hold"))
-            print(f"[cal] {_lbl:16s} {str(e.get('close_rad', '-')):>10s} "
-                  f"{str(e.get('TOOL_OFFSET_Z', '-')):>14s} "
-                  f"{str(e.get('tactile_peak_sum', '-')):>10s} "
-                  f"{('-' if _ind is None else f'{_ind*1000:.3f}'):>10s}")
-        try:
-            d = abs(float(rows[0][1]["TOOL_OFFSET_Z"])
-                    - float(rows[1][1]["TOOL_OFFSET_Z"])) * 1000.0
-            print(f"[cal] offset differs by {d:.2f} mm — whichever file you "
-                  f"collect with, the closing mode must match it.")
-        except Exception:
-            pass
-        print("[cal] " + "=" * 58)
-
-    if CALIBRATE:
-        if CALIB_BOTH:
-            # Same descent, two closes, two files. Order matters only in that
-            # pt00 (fixed) is the one that also proves the pose was reachable.
-            for _tag_c, _sfx_c in (("pt00", "_fixed"), ("pt01", "_contact")):
-                _pf_c = f"pad_truth_probe_{_tag_c}.json"
-                if not os.path.isfile(os.path.join(OUTPUT_DIR, _pf_c)):
-                    print(f"[cal] {_tag_c}: no probe file — that grasp did not "
-                          f"complete, nothing stored for {_sfx_c}")
-                    continue
-                print(f"\n[cal] ===== storing {_tag_c} -> {_sfx_c} =====")
-                _calibrate_store(_pf_c, _sfx_c, _tag_c)
-            _summarise_both()
-        else:
-            _calibrate_store("pad_truth_probe.json",
-                             CAL_SUFFIX if CAL_SUFFIX
-                             else ("_contact" if CONTACT_CLOSE else ""),
-                             "pt00")
 finally:
     print("[cfg] holding window 5s before close...")
     for _ in range(5 * 60):
