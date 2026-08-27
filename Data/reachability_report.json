@@ -1,13 +1,13 @@
 {
-  "generated": "20260825_181748",
-  "config": "/home/kourosh/Paper3_Simulation/Data/gui_calib_config.json",
+  "generated": "20260827_084950",
+  "config": "/home/kourosh/Paper3_Simulation/Data/gui_config.json",
   "object_center_mm": [
     -268.06,
     199.0,
     1052.2
   ],
   "diameter_mm": 26.0,
-  "TOOL_OFFSET_Z": 0.15,
+  "TOOL_OFFSET_Z": 0.15657,
   "settings": {
     "max_joint_step": 0.02,
     "max_steps_cap": 500,
@@ -26,24 +26,24 @@
     {
       "index": 0,
       "pad_offset_y_mm": 0.0,
-      "pad_offset_z_mm": 33.46,
+      "pad_offset_z_mm": 31.43,
       "pad_target_world_mm": [
         -268.06,
         199.0,
-        1085.66
+        1083.63
       ],
       "ee_target_world_mm": [
         -268.06,
         199.0,
-        1235.66
+        1240.2
       ],
       "q_goal_rad": [
-        -0.8563087582588196,
-        -1.9692809581756592,
-        -1.7432351112365723,
-        -0.9999302625656128,
-        1.5707942247390747,
-        -0.8563064932823181
+        -0.85635906457901,
+        -1.9629230499267578,
+        -1.737866997718811,
+        -1.0116573572158813,
+        1.570786952972412,
+        -0.8563571572303772
       ],
       "reachable": true,
       "reason": "converged (trajectory dry-run)",
@@ -54,31 +54,66 @@
       "n_steps": 44,
       "pos_err_final_m": 0.0,
       "rot_err_final_deg": 0.0,
-      "min_sigma": 0.14097983478495285,
+      "min_sigma": 0.13719884483483857,
       "reason_code": "ok",
       "precheck_path": "up_then_down"
     },
     {
       "index": 1,
-      "pad_offset_y_mm": 0.0,
-      "pad_offset_z_mm": 33.46,
+      "pad_offset_y_mm": -8.0,
+      "pad_offset_z_mm": 15.43,
       "pad_target_world_mm": [
         -268.06,
-        199.0,
-        1085.66
+        191.0,
+        1067.63
       ],
       "ee_target_world_mm": [
         -268.06,
-        199.0,
-        1235.66
+        191.0,
+        1224.2
       ],
       "q_goal_rad": [
-        -0.8563087582588196,
-        -1.9692809581756592,
-        -1.7432351112365723,
-        -0.9999302625656128,
-        1.5707942247390747,
-        -0.8563064932823181
+        -0.8474441170692444,
+        -1.969562292098999,
+        -1.7767503261566162,
+        -0.9661334753036499,
+        1.5707905292510986,
+        -0.8474418520927429
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "advisory": [],
+      "reach_strict": false,
+      "limit_hits": [],
+      "iters": 2,
+      "n_steps": 3,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23713155360973892,
+      "reason_code": "ok",
+      "precheck_path": "pad_to_pad"
+    },
+    {
+      "index": 2,
+      "pad_offset_y_mm": -8.0,
+      "pad_offset_z_mm": 23.43,
+      "pad_target_world_mm": [
+        -268.06,
+        191.0,
+        1075.63
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        191.0,
+        1232.2
+      ],
+      "q_goal_rad": [
+        -0.8474445939064026,
+        -1.9587922096252441,
+        -1.7682888507843018,
+        -0.9853670597076416,
+        1.5707935094833374,
+        -0.8474447727203369
       ],
       "reachable": true,
       "reason": "converged (trajectory dry-run)",
@@ -89,30 +124,450 @@
       "n_steps": 2,
       "pos_err_final_m": 0.0,
       "rot_err_final_deg": 0.0,
-      "min_sigma": 0.24078815967962885,
+      "min_sigma": 0.24422455414764482,
+      "reason_code": "ok",
+      "precheck_path": "pad_to_pad"
+    },
+    {
+      "index": 3,
+      "pad_offset_y_mm": -8.0,
+      "pad_offset_z_mm": 31.43,
+      "pad_target_world_mm": [
+        -268.06,
+        191.0,
+        1083.63
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        191.0,
+        1240.2
+      ],
+      "q_goal_rad": [
+        -0.8474462628364563,
+        -1.9483498334884644,
+        -1.7594503164291382,
+        -1.0046484470367432,
+        1.5707933902740479,
+        -0.8474457859992981
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "advisory": [],
+      "reach_strict": false,
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23801007459225756,
+      "reason_code": "ok",
+      "precheck_path": "pad_to_pad"
+    },
+    {
+      "index": 4,
+      "pad_offset_y_mm": -8.0,
+      "pad_offset_z_mm": 39.43,
+      "pad_target_world_mm": [
+        -268.06,
+        191.0,
+        1091.63
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        191.0,
+        1248.2
+      ],
+      "q_goal_rad": [
+        -0.8474458456039429,
+        -1.9382389783859253,
+        -1.7502440214157104,
+        -1.0239661931991577,
+        1.5707919597625732,
+        -0.8474459052085876
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "advisory": [],
+      "reach_strict": false,
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23418672724762504,
+      "reason_code": "ok",
+      "precheck_path": "pad_to_pad"
+    },
+    {
+      "index": 5,
+      "pad_offset_y_mm": -8.0,
+      "pad_offset_z_mm": 47.43,
+      "pad_target_world_mm": [
+        -268.06,
+        191.0,
+        1099.63
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        191.0,
+        1256.2
+      ],
+      "q_goal_rad": [
+        -0.8474465608596802,
+        -1.9284569025039673,
+        -1.7406598329544067,
+        -1.043330192565918,
+        1.5707924365997314,
+        -0.8474466800689697
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "advisory": [],
+      "reach_strict": false,
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23817038627004697,
+      "reason_code": "ok",
+      "precheck_path": "pad_to_pad"
+    },
+    {
+      "index": 6,
+      "pad_offset_y_mm": 0.0,
+      "pad_offset_z_mm": 47.43,
+      "pad_target_world_mm": [
+        -268.06,
+        199.0,
+        1099.63
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        199.0,
+        1256.2
+      ],
+      "q_goal_rad": [
+        -0.856360137462616,
+        -1.9433258771896362,
+        -1.7191340923309326,
+        -1.049989104270935,
+        1.5707942247390747,
+        -0.8563594818115234
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "advisory": [],
+      "reach_strict": false,
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23593000664649794,
+      "reason_code": "ok",
+      "precheck_path": "pad_to_pad"
+    },
+    {
+      "index": 7,
+      "pad_offset_y_mm": 0.0,
+      "pad_offset_z_mm": 39.43,
+      "pad_target_world_mm": [
+        -268.06,
+        199.0,
+        1091.63
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        199.0,
+        1248.2
+      ],
+      "q_goal_rad": [
+        -0.8563593626022339,
+        -1.9529660940170288,
+        -1.7286802530288696,
+        -1.0307972431182861,
+        1.5707895755767822,
+        -0.8563594222068787
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "advisory": [],
+      "reach_strict": false,
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23569696255753436,
+      "reason_code": "ok",
+      "precheck_path": "pad_to_pad"
+    },
+    {
+      "index": 8,
+      "pad_offset_y_mm": 0.0,
+      "pad_offset_z_mm": 23.43,
+      "pad_target_world_mm": [
+        -268.06,
+        199.0,
+        1075.63
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        199.0,
+        1232.2
+      ],
+      "q_goal_rad": [
+        -0.856357216835022,
+        -1.9732106924057007,
+        -1.7466487884521484,
+        -0.9925891160964966,
+        1.5707933902740479,
+        -0.8563567399978638
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "advisory": [],
+      "reach_strict": false,
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23706454006020544,
+      "reason_code": "ok",
+      "precheck_path": "pad_to_pad"
+    },
+    {
+      "index": 9,
+      "pad_offset_y_mm": 0.0,
+      "pad_offset_z_mm": 15.43,
+      "pad_target_world_mm": [
+        -268.06,
+        199.0,
+        1067.63
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        199.0,
+        1224.2
+      ],
+      "q_goal_rad": [
+        -0.856357753276825,
+        -1.9838217496871948,
+        -1.755073070526123,
+        -0.9735525846481323,
+        1.5707905292510986,
+        -0.8563580513000488
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "advisory": [],
+      "reach_strict": false,
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23734995028967076,
+      "reason_code": "ok",
+      "precheck_path": "pad_to_pad"
+    },
+    {
+      "index": 10,
+      "pad_offset_y_mm": 8.0,
+      "pad_offset_z_mm": 15.43,
+      "pad_target_world_mm": [
+        -268.06,
+        207.0,
+        1067.63
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        207.0,
+        1224.2
+      ],
+      "q_goal_rad": [
+        -0.8650769591331482,
+        -1.9981379508972168,
+        -1.7331231832504272,
+        -0.9811890125274658,
+        1.5707927942276,
+        -0.8650753498077393
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "advisory": [],
+      "reach_strict": false,
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23720833908559943,
+      "reason_code": "ok",
+      "precheck_path": "pad_to_pad"
+    },
+    {
+      "index": 11,
+      "pad_offset_y_mm": 8.0,
+      "pad_offset_z_mm": 23.43,
+      "pad_target_world_mm": [
+        -268.06,
+        207.0,
+        1075.63
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        207.0,
+        1232.2
+      ],
+      "q_goal_rad": [
+        -0.8650779724121094,
+        -1.9876917600631714,
+        -1.7247194051742554,
+        -1.0000439882278442,
+        1.5707932710647583,
+        -0.8650763630867004
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "advisory": [],
+      "reach_strict": false,
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23895902488228857,
+      "reason_code": "ok",
+      "precheck_path": "pad_to_pad"
+    },
+    {
+      "index": 12,
+      "pad_offset_y_mm": 8.0,
+      "pad_offset_z_mm": 31.43,
+      "pad_target_world_mm": [
+        -268.06,
+        207.0,
+        1083.63
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        207.0,
+        1240.2
+      ],
+      "q_goal_rad": [
+        -0.865081250667572,
+        -1.977560043334961,
+        -1.715952754020691,
+        -1.0189363956451416,
+        1.5708001852035522,
+        -0.8650705218315125
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "advisory": [],
+      "reach_strict": false,
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23350376336990306,
+      "reason_code": "ok",
+      "precheck_path": "pad_to_pad"
+    },
+    {
+      "index": 13,
+      "pad_offset_y_mm": 8.0,
+      "pad_offset_z_mm": 39.43,
+      "pad_target_world_mm": [
+        -268.06,
+        207.0,
+        1091.63
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        207.0,
+        1248.2
+      ],
+      "q_goal_rad": [
+        -0.86507648229599,
+        -1.967742681503296,
+        -1.7068175077438354,
+        -1.0378994941711426,
+        1.5707813501358032,
+        -0.8650752305984497
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "advisory": [],
+      "reach_strict": false,
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.2371346259133253,
+      "reason_code": "ok",
+      "precheck_path": "pad_to_pad"
+    },
+    {
+      "index": 14,
+      "pad_offset_y_mm": 8.0,
+      "pad_offset_z_mm": 47.43,
+      "pad_target_world_mm": [
+        -268.06,
+        207.0,
+        1099.63
+      ],
+      "ee_target_world_mm": [
+        -268.06,
+        207.0,
+        1256.2
+      ],
+      "q_goal_rad": [
+        -0.8650863766670227,
+        -1.9582587480545044,
+        -1.697310209274292,
+        -1.0568803548812866,
+        1.5707812309265137,
+        -0.8650718331336975
+      ],
+      "reachable": true,
+      "reason": "converged (trajectory dry-run)",
+      "advisory": [],
+      "reach_strict": false,
+      "limit_hits": [],
+      "iters": 1,
+      "n_steps": 2,
+      "pos_err_final_m": 0.0,
+      "rot_err_final_deg": 0.0,
+      "min_sigma": 0.23422305094949405,
       "reason_code": "ok",
       "precheck_path": "pad_to_pad"
     }
   ],
-  "n_points": 2,
-  "n_reachable": 2,
+  "n_points": 15,
+  "n_reachable": 15,
   "n_unreachable": 0,
   "by_reason_code": {
-    "ok": 2
+    "ok": 15
   },
   "by_precheck_path": {
     "up_then_down": 1,
-    "pad_to_pad": 1
+    "pad_to_pad": 14
   },
   "grasp_rot_deg": 0.0,
   "use_collision_world": true,
   "collision_untested": false,
   "collision_model": {
-    "n_spheres": 28,
-    "reach_beyond_flange_mm": 50.999995390066836,
-    "pad_offset_mm": 150.0,
-    "gripper_modelled": false
+    "n_spheres": 45,
+    "reach_beyond_flange_mm": 133.00001218999662,
+    "pad_offset_mm": 156.57,
+    "gripper_modelled": true
   },
-  "robot_yaml": "ur5e.yml",
-  "tool_collision": false
+  "robot_yaml": "ur5e_gripper.yml",
+  "tool_collision": true
 }

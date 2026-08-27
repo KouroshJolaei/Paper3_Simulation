@@ -82,6 +82,14 @@ PAD_CENTER_ABOVE_CASE_M = 0.0221   # MEASURED from the extension's own mesh log
 
 CAL_DEFAULT_OFFST = 0.15     # m, provisional offset used ONLY during calibration
 CAL_FILE = os.path.expanduser("~/Paper3_Simulation/Data/pad_offset_calibration.json")
+if os.environ.get("GRASP_CAL_READ"):
+    _c = CAL_FILE.replace(".json", os.environ["GRASP_CAL_READ"] + ".json")
+    if os.path.isfile(_c):
+        CAL_FILE = _c
+        print(f"[cal] reading calibration from {os.path.basename(CAL_FILE)}")
+    else:
+        print(f"[cal] GRASP_CAL_READ asked for {os.path.basename(_c)} but it "
+              f"does not exist — falling back to the main file")
 OBJ_DIAM_MM = float(CONFIG["object"].get("diameter_mm", 0.0))
 CALIBRATE   = os.environ.get("GRASP_CALIBRATE", "0") == "1"
 # Contact-aware closing. OFF by default, so every existing command is unchanged.
@@ -100,6 +108,14 @@ CONTACT_TARGET  = float(os.environ.get("GRASP_CONTACT_TARGET", "0.0010"))
 CAL_SUFFIX = os.environ.get("GRASP_CAL_SUFFIX", "")
 # Calibrate BOTH closing modes in one session, one descent, two closes.
 CALIB_BOTH = os.environ.get("GRASP_CALIB_BOTH", "0") == "1"
+# Per-grasp tactile peak. In both-mode the two grasps share one CSV, so a peak
+# read over the whole file gives BOTH entries the same number (observed:
+# 15075.2 in each, when fixed and contact demonstrably squeeze differently).
+_PEAK_LOG = {}
+# Which calibration file to READ. Must match what the GUI designed the grid
+# with, or the pad lands off by the difference between them (0.26 mm between
+# fixed and contact on D26).
+CAL_READ_SUFFIX = os.environ.get("GRASP_CAL_READ", "")
 # Below this, at the hold, the pads did not touch the object. 0.05 is far under
 # a real grasp (~1.15 on a firm D60) and far over the 0.000127 the log shows
 # while the fingers are merely moving, so it separates the two cleanly.
@@ -547,7 +563,17 @@ _tsf.set("/exts/TSF_85_Ext/output_dir",    OUTPUT_DIR)
 _tsf.set("/exts/TSF_85_Ext/base_name",     BASENAME)
 _tsf.set("/exts/TSF_85_Ext/log_dz",        True)
 _tsf.set("/exts/TSF_85_Ext/log_pred",      True)
-_tsf.set("/exts/TSF_85_Ext/log_mesh",      True)
+# LOG_MESH: the per-physics-frame *_mesh_state.csv and *_deformations.csv.
+# ~98 MB per grasp (measured: 6.2 GB for a 63-point run), and NOTHING
+# downstream reads them -- stitching, pairs, blob and heatmaps all use
+# *_tactile_maps.csv only, and the contact-aware close reads USD prims live
+# rather than any CSV. Kept ON by default because it is Berith's diagnostic;
+# the batch runner turns it off, where 600 grasps would otherwise write 59 GB
+# and put a per-frame disk write inside the physics loop.
+_LOG_MESH = os.environ.get("GRASP_LOG_MESH", "1") == "1"
+_tsf.set("/exts/TSF_85_Ext/log_mesh",      _LOG_MESH)
+print(f"[cfg] log_mesh = {_LOG_MESH}"
+      + ("" if _LOG_MESH else "  (per-frame mesh CSVs OFF, ~98 MB/grasp saved)"))
 
 from omni.kit.app import get_app
 _ext_mgr = get_app().get_extension_manager()
@@ -1879,6 +1905,7 @@ def write_execution_ledger(out_dir):
                      if c.get("contact_target_reached") is False)
     doc = {"generated": _stamp, "config": _args.config,
            "grasp_rot_deg": float(ROT_DEG),
+           "log_mesh": _LOG_MESH,
            "closing": {
                "mode": "contact" if CONTACT_CLOSE else "fixed_angle",
                "signal": CONTACT_SIGNAL if CONTACT_CLOSE else None,
@@ -2347,6 +2374,168 @@ def read_deformation(subsample=4):
     return (max(out.values()) if out else 0.0), out
 
 
+# ---- LIVE TACTILE, read from the extension in memory (2026-08-25) --------
+# The collector runs INSIDE Isaac, in the same process as the TSF-85 extension,
+# so the CNN's output is reachable even though the carb settings are write-only
+# from here. extension.py keeps `_last_pred` / `_last_pred_frame` for sensor 1
+# and sensor_channel.SensorChannel keeps `last_pred` / `last_pred_frame` for
+# sensor 2, both updated every inference pass.
+#
+# WHY NOT TAIL THE CSV. logging_data.py flushes every 50 frames. A whole close
+# ramp is 60 frames, so tailing would deliver about one update during the
+# entire close -- useless for stopping at the right moment.
+#
+# WHY NOT RUN THE ONNX MODEL OURSELVES. We would have to reproduce Berith's
+# preprocessing exactly, and getting it subtly wrong yields plausible-but-wrong
+# tactile numbers. Reading his own output cannot be subtly wrong.
+#
+# THE CATCH, AND IT MATTERS. Inference is an async loop that pops the newest
+# frame and CLEARS the queue, so predictions are NOT synchronous with physics
+# and `_last_pred` can go stale with no outward sign -- the value is still
+# there, just old. Acting on a stale reading while the fingers keep closing
+# means stopping late or never. So every read returns the frame it came from,
+# and the closing loop refuses to trust a reading whose frame has not advanced.
+_TSF_EXT = [None]
+
+
+def _find_tsf_extension():
+    """The live Extension instance, found by walking the heap.
+
+    Deliberately NOT done by importing the extension or adding a singleton to
+    it: this touches none of Berith's code, so his next model drop cannot break
+    it. Returns None if the extension is not loaded."""
+    if _TSF_EXT[0] is not None:
+        return _TSF_EXT[0]
+    import gc
+    for o in gc.get_objects():
+        try:
+            if (type(o).__name__ == "Extension"
+                    and hasattr(o, "_last_pred")
+                    and hasattr(o, "_infer_queue")):
+                _TSF_EXT[0] = o
+                print(f"[tactile] extension instance found: {type(o).__module__}")
+                return o
+        except Exception:
+            continue
+    print("[tactile] extension instance NOT found — live tactile unavailable")
+    return None
+
+
+def read_tactile():
+    """Live tactile sum per pad, in the same counts the CSV records.
+
+    Returns (worst_sum, {s1:..., s2:...}, {s1_frame:..., s2_frame:...}).
+    The per-pad number is the sum of the 28 taxels, which is what
+    `tactile_peak_sum` in the calibration file is the maximum of over a run --
+    so a target set here is directly comparable with the 8600-15400 those
+    entries record. MAX of the two pads: one pad in contact is enough."""
+    ext = _find_tsf_extension()
+    vals, frames = {"s1": 0.0, "s2": 0.0}, {"s1": None, "s2": None}
+    if ext is None:
+        return 0.0, vals, frames
+    try:
+        p1 = getattr(ext, "_last_pred", None)
+        if p1 is not None:
+            vals["s1"] = float(np.asarray(p1, float).reshape(-1).sum())
+            frames["s1"] = getattr(ext, "_last_pred_frame", None)
+    except Exception:
+        pass
+    try:
+        ch = getattr(ext, "_sensor2", None)
+        p2 = getattr(ch, "last_pred", None) if ch is not None else None
+        if p2 is not None:
+            vals["s2"] = float(np.asarray(p2, float).reshape(-1).sum())
+            frames["s2"] = getattr(ch, "last_pred_frame", None)
+    except Exception:
+        pass
+    return max(vals.values()), vals, frames
+
+
+def read_contact_signal():
+    """Whichever signal the run was told to close on: (value, per_pad, frame).
+
+    frame is None for deformation, which is read straight off the USD prims and
+    is therefore always current."""
+    if CONTACT_SIGNAL == "tactile":
+        v, per, fr = read_tactile()
+        f = fr.get("s1") if fr.get("s1") is not None else fr.get("s2")
+        return v, per, f
+    v, per = read_deformation()
+    return v, per, None
+
+
+# ---- LIVE PUBLISH, for the GUI's viewer tab -----------------------------
+# The GUI is a SEPARATE PROCESS from Isaac, so it cannot read _last_pred no
+# matter what. Only this process can. So the collector publishes a small JSON
+# and the tab polls it -- which also means the viewer works headless, during a
+# batch, and after the Isaac window is closed, because none of that changes
+# who is holding the numbers.
+#
+# A DAEMON THREAD, not a call inside the stepping code. World.step() is invoked
+# from a dozen places (ramp, hold, descent, ascent, pad-to-pad) and patching
+# them all would leave gaps exactly where the interesting things happen. A
+# thread reading at a fixed rate has no gaps and no call sites to maintain.
+LIVE_TACTILE = os.environ.get("GRASP_LIVE_TACTILE", "1") == "1"
+LIVE_TACTILE_HZ = float(os.environ.get("GRASP_LIVE_TACTILE_HZ", "20"))
+LIVE_TACTILE_PATH = os.path.expanduser(
+    "~/Paper3_Simulation/Data/live_tactile.json")
+
+
+def _live_tactile_publisher():
+    """Write the two pads' current prediction to a fixed path, forever."""
+    import threading, time as _time, json as _json
+
+    def _loop():
+        period = 1.0 / max(1.0, LIVE_TACTILE_HZ)
+        tmp = LIVE_TACTILE_PATH + ".tmp"
+        os.makedirs(os.path.dirname(LIVE_TACTILE_PATH), exist_ok=True)
+        while True:
+            try:
+                ext = _find_tsf_extension()
+                doc = {"t": _time.time(), "run": os.path.basename(OUTPUT_DIR),
+                       # full path, so the viewer can open THIS run's folder
+                       # and default its saves there rather than to Data/
+                       "run_dir": OUTPUT_DIR,
+                       "tag": _LIVE_TAG[0], "phase": _LIVE_PHASE[0],
+                       "s1": None, "s2": None,
+                       "frame_s1": None, "frame_s2": None}
+                if ext is not None:
+                    p1 = getattr(ext, "_last_pred", None)
+                    if p1 is not None:
+                        doc["s1"] = [float(v) for v in
+                                     np.asarray(p1, float).reshape(-1)]
+                        doc["frame_s1"] = getattr(ext, "_last_pred_frame", None)
+                    ch = getattr(ext, "_sensor2", None)
+                    p2 = getattr(ch, "last_pred", None) if ch is not None else None
+                    if p2 is not None:
+                        doc["s2"] = [float(v) for v in
+                                     np.asarray(p2, float).reshape(-1)]
+                        doc["frame_s2"] = getattr(ch, "last_pred_frame", None)
+                with open(tmp, "w") as f:
+                    _json.dump(doc, f)
+                os.replace(tmp, LIVE_TACTILE_PATH)   # atomic: never half-read
+            except Exception:
+                pass          # a viewer must never be able to kill a run
+            _time.sleep(period)
+
+    th = threading.Thread(target=_loop, name="live_tactile", daemon=True)
+    th.start()
+    print(f"[live] publishing tactile at {LIVE_TACTILE_HZ:g} Hz -> "
+          f"{LIVE_TACTILE_PATH}")
+    return th
+
+
+_LIVE_TAG = ["-"]
+_LIVE_PHASE = ["idle"]
+
+# Started HERE, not up with the other extension settings (2026-08-25). The
+# call sat at module line ~576 while this function is defined ~1900 lines
+# lower, so it raised NameError and killed the run before the scene loaded.
+# Anything that starts a thread has to come after the thing it starts.
+if LIVE_TACTILE:
+    _live_tactile_publisher()
+
+
 def ramp_gripper_to_contact(arm_q, target, n_frames, contact_target,
                             label="close", baseline=0.0):
     """Close until the pads deform contact_target ABOVE BASELINE.
@@ -2367,15 +2556,23 @@ def ramp_gripper_to_contact(arm_q, target, n_frames, contact_target,
 
     Returns (stopped_angle, achieved_deformation, reached_target)."""
     cur_g = float(robot.get_joint_positions()[gi[0]])
-    print(f"[{label}] closing: need {contact_target*1000:.3f} mm of pad "
-          f"indentation, ceiling {target:.4f} rad")
+    _tac = (CONTACT_SIGNAL == "tactile")
+    _u, _sc = ("counts", 1.0) if _tac else ("mm", 1000.0)
+    print(f"[{label}] closing on {CONTACT_SIGNAL}: need "
+          f"{contact_target*_sc:.3f} {_u} above rest, ceiling {target:.4f} rad")
     best, per = 0.0, {}
+    _f0, _moved = None, False
     for k in range(n_frames):
         alpha = (k + 1) / n_frames
         apply_arm_and_grip(arm_q, grip_val=cur_g + alpha * (target - cur_g))
         world.step(render=True)
         _watch("ramp", k)
-        raw, per = read_deformation()
+        raw, per, _fr = read_contact_signal()
+        if _fr is not None:
+            if _f0 is None:
+                _f0 = _fr
+            elif _fr != _f0:
+                _moved = True
         rise = raw - baseline
         best = max(best, rise)
         # A TRACE, not decoration. Until a firm grasp has been observed we do
@@ -2385,19 +2582,33 @@ def ramp_gripper_to_contact(arm_q, target, n_frames, contact_target,
         if (k + 1) % 5 == 0 or k == 0:
             q_now = float(robot.get_joint_positions()[gi[0]])
             print(f"[{label}]   frame {k+1:3d}/{n_frames}  angle {q_now:.4f}  "
-                  f"rise {rise*1000:+7.3f} mm  "
-                  f"(s1 {per.get('s1', 0)*1000:.3f} "
-                  f"s2 {per.get('s2', 0)*1000:.3f} mm)")
+                  f"rise {rise*_sc:+9.3f} {_u}  "
+                  f"(s1 {per.get('s1', 0)*_sc:.3f} "
+                  f"s2 {per.get('s2', 0)*_sc:.3f})"
+                  + (f"  pred frame {_fr}" if _fr is not None else ""))
         if rise >= contact_target:
             q = float(robot.get_joint_positions()[gi[0]])
-            print(f"[{label}] CONTACT: indentation {rise*1000:.3f} mm >= "
-                  f"{contact_target*1000:.3f} mm after {k+1}/{n_frames} "
+            print(f"[{label}] CONTACT: {rise*_sc:.3f} {_u} >= "
+                  f"{contact_target*_sc:.3f} after {k+1}/{n_frames} "
                   f"frames, finger angle {q:.4f} rad (ceiling {target:.4f})")
             return q, rise, True
     q = float(robot.get_joint_positions()[gi[0]])
-    print(f"[{label}] !! TARGET NEVER REACHED: best {best*1000:.3f} mm vs "
-          f"{contact_target*1000:.3f} mm. Closed to the ceiling {q:.4f} rad — "
-          f"i.e. exactly what the fixed-angle mode would have done.")
+    if _tac and _f0 is not None and not _moved:
+        # The prediction never advanced a frame during the whole close: the
+        # async inference loop was starved, so every reading was the SAME stale
+        # value. That is not "no contact", it is "we were not looking", and the
+        # two must never be confused.
+        print(f"[{label}] !! TACTILE WENT STALE: the prediction stayed on "
+              f"frame {_f0} for all {n_frames} frames, so the signal was never "
+              f"live. Closed to the ceiling {q:.4f} rad. Treat this run as "
+              f"FIXED-ANGLE, not contact-aware.")
+    elif _tac and _f0 is None:
+        print(f"[{label}] !! NO TACTILE AT ALL: the extension was not "
+              f"reachable. Closed to the ceiling {q:.4f} rad.")
+    else:
+        print(f"[{label}] !! TARGET NEVER REACHED: best {best*_sc:.3f} {_u} vs "
+              f"{contact_target*_sc:.3f}. Closed to the ceiling {q:.4f} rad — "
+              f"i.e. exactly what the fixed-angle mode would have done.")
     return q, best, False
 
 
@@ -2769,13 +2980,18 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
     if PROBE:
         _probe["open_grip"] = _probe_all(_probe_prims)   # BEFORE closing
     _tsf.set("/exts/TSF_85_Ext/record_active", True)
+    _LIVE_TAG[0], _LIVE_PHASE[0] = tag, "closing"
     _progress(f"{tag} CLOSE start")
     print(f"[{tag}] [RECORD ON] close -> hold -> open ...")
     # Baseline: the pads are at the grasp pose but still OPEN, so whatever
     # deformation they read now is rest state, not contact.
-    _base_def, _base_per = read_deformation()
-    print(f"[{tag}] indentation baseline (open, before closing): "
-          f"{_base_def*1000:.4f} mm  (should be ~0)")
+    _base_def, _base_per, _base_fr = read_contact_signal()
+    _u_lab = "counts" if CONTACT_SIGNAL == "tactile" else "mm"
+    _sc_lab = 1.0 if CONTACT_SIGNAL == "tactile" else 1000.0
+    print(f"[{tag}] {CONTACT_SIGNAL} baseline (open, before closing): "
+          f"{_base_def*_sc_lab:.4f} {_u_lab}"
+          + (f"  pred frame {_base_fr}" if _base_fr is not None else
+             "  (should be ~0)"))
     # In "both" mode the mode is chosen per point: pt00 fixed, pt01 contact.
     _use_contact = (tag == "pt01") if (CALIBRATE and CALIB_BOTH) else CONTACT_CLOSE
     if _use_contact:
@@ -2786,6 +3002,7 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
         ramp_gripper(hold_qg, CLOSE_RAD, GRIPPER_RAMP_FRAMES)
         _q_stop, _hit = float(robot.get_joint_positions()[gi[0]]), None
         _got = None
+    _LIVE_PHASE[0] = "hold"
     _progress(f"{tag} CLOSE done, holding")
     hold_for(hold_qg, WAIT_HOLD_SECONDS, _phase="hold_closed")
 
@@ -2795,11 +3012,12 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
     # grasp that touched nothing is recorded as it happens instead of being
     # discovered days later in a stitched map. It never aborts the run -- one
     # bad point must not cost the other ninety-nine.
-    _hold_raw, _hold_per = read_deformation()
+    _hold_raw, _hold_per, _hold_fr = read_contact_signal()
     _hold_def = _hold_raw - _base_def          # RISE above rest, see above
     _dead = _hold_def < DEAD_GRASP_FLOOR
     _CONTACT_LOG[tag] = {
         "closing_mode": "contact" if _use_contact else "fixed_angle",
+        "contact_signal": CONTACT_SIGNAL,
         "close_rad_ceiling": float(CLOSE_RAD),
         "close_rad_stopped": round(float(_q_stop), 5),
         "contact_target": float(CONTACT_TARGET) if _use_contact else None,
@@ -2813,11 +3031,11 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
         "dead_grasp": bool(_dead),
     }
     if _dead:
-        print(f"[{tag}] !! DEAD GRASP: only {_hold_def*1000:.3f} mm of pad "
-              f"indentation, under the floor {DEAD_GRASP_FLOOR*1000:.3f} mm. "
-              f"Recorded and continuing.")
+        print(f"[{tag}] !! DEAD GRASP: only {_hold_def*_sc_lab:.3f} {_u_lab} "
+              f"above rest, under the floor "
+              f"{DEAD_GRASP_FLOOR*_sc_lab:.3f}. Recorded and continuing.")
     else:
-        print(f"[{tag}] contact OK: {_hold_def*1000:.3f} mm of pad indentation")
+        print(f"[{tag}] contact OK: {_hold_def*_sc_lab:.3f} {_u_lab} above rest")
     if PROBE:
         _probe["closed_grip"] = _probe_all(_probe_prims)  # AFTER closing (has the swing)
         _probe["finger_joint_rad"] = (float(robot.get_joint_positions()[gi[0]])
@@ -2974,6 +3192,7 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
             print(f"[{tag}] {_probe_name} written")
         except Exception as _pe:
             print(f"[{tag}] pad_truth_probe write FAILED ({_pe})")
+    _LIVE_PHASE[0] = "opening"
     _progress(f"{tag} OPEN start")
     ramp_gripper(hold_qg, GRIPPER_OPEN, GRIPPER_RAMP_FRAMES)
     _tsf.set("/exts/TSF_85_Ext/record_active", False)
@@ -3185,11 +3404,17 @@ try:
             # ---- CONTACT GATE: did the pads actually touch the object? --------
             # The pad pose reads 'live' even when closing on AIR (the fingers
             # still swing). The only true contact signal is the tactile sum
-            # rising (the Roberge-paper test). Read the pt00 tactile peak for
-            # BOTH sensors; if neither rises above threshold, REFUSE to store.
+            # rising (the Roberge-paper test). Read THIS GRASP's tactile peak
+            # for both sensors; if neither rises, REFUSE to store.
+            #
+            # The tag was hardcoded to pt00 (2026-08-25). Harmless while
+            # calibrate meant one grasp; in both-mode it gave the contact entry
+            # the FIXED grasp's peak, so both files read 15075.2 even though
+            # the two squeeze differently by construction.
             CONTACT_MIN_SUM = 1000.0   # baseline ~250, real contact ~6000
             def _tactile_peak(sensor):
-                fn = os.path.join(OUTPUT_DIR, f"{BASENAME}_pt00_{sensor}_tactile_maps.csv")
+                fn = os.path.join(OUTPUT_DIR,
+                                  f"{BASENAME}_{_tag_in}_{sensor}_tactile_maps.csv")
                 if not os.path.exists(fn):
                     fn = os.path.join(OUTPUT_DIR, f"{BASENAME}_{sensor}_tactile_maps.csv")
                 if not os.path.exists(fn):
@@ -3305,7 +3530,10 @@ try:
                     "finger_joint_rad": _pt.get("finger_joint_rad"),
                     "tactile_peak_sum": round(float(_peak), 1),
                     "measured_at": _stamp,
-                    **({"contact_close": _cc} if ((_cc or {}).get("closing_mode") == "contact" and _cc) else {}),
+                    # Recorded for EITHER mode. The fixed grasp's indentation
+                    # is half of what makes the two comparable, and leaving it
+                    # out made the both-mode table half empty.
+                    **({"contact_close": _cc} if _cc else {}),
                 }
                 print(f"\n[cal] CALIBRATED (measured live pad) diameter {OBJ_DIAM_MM} mm")
                 print(f"[cal]   case-origin offset = {_off_case}  + pad-centre shift "

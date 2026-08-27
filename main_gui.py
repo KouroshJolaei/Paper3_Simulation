@@ -25,7 +25,7 @@ PREVIEW_TICK_MINOR_MM = 2.0
 import tkinter as tk
 from tkinter import ttk, messagebox
 import numpy as np
-import os, json, subprocess, threading
+import os, json, subprocess, threading, time
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.patches as mpatches
@@ -742,7 +742,17 @@ class CockpitGUI:
             # fixed | contact | both. "both" measures the SAME diameter twice
             # in one sitting, one grasp per mode, into two separate files.
             "calib_mode": tk.StringVar(value="fixed angle"),
-            "contact_signal": tk.StringVar(value="deformation"),
+            # WHICH calibration file the grid designer reads AND the collector
+            # runs with. They must agree: the offsets differ by 0.26 mm on D26
+            # between fixed and contact, and a mismatch puts every pad that far
+            # off with nothing to show it.
+            "calib_source": tk.StringVar(value="main"),
+            # Per-frame mesh CSVs: ~98 MB per grasp, and nothing downstream
+            # reads them. ON here (single runs are where you might want the
+            # diagnostic), OFF in the batch tab.
+            "log_mesh": tk.BooleanVar(value=True),
+            "batch_log_mesh": tk.BooleanVar(value=False),
+            "contact_signal": tk.StringVar(value="deformation (mm)"),
             "contact_target": tk.StringVar(value="1.00"),
             # Emitted as GRASP_TOOL_COLLISION. Default ON: the collector's own
             # log says that without it "a plan that sweeps the FINGERS or the
@@ -765,14 +775,20 @@ class CockpitGUI:
         root.columnconfigure(0, weight=1)
         root.rowconfigure(0, weight=1)
         self.tab_collect = ttk.Frame(self.nb)
+        self.tab_live = ttk.Frame(self.nb)
+        self.tab_batch = ttk.Frame(self.nb)
         self.tab_stitch = ttk.Frame(self.nb)
         self.tab_calib = ttk.Frame(self.nb)
         self.nb.add(self.tab_collect, text="Collection")
         self.nb.add(self.tab_calib, text="Calibrate")
+        self.nb.add(self.tab_live, text="Live Tactile")
+        self.nb.add(self.tab_batch, text="Batch")
         self.nb.add(self.tab_stitch, text="Stitching (Block 2)")
 
         self._build_inputs()
         self._build_preview()
+        self._build_live_tab()
+        self._build_batch_tab()
         self._build_stitch_tab()
         self._build_calib_tab()
         self.refresh()
@@ -940,6 +956,21 @@ class CockpitGUI:
                                   "(slower, skips points the arm cannot reach)",
                         variable=self.vars["reach_check"]).grid(
             row=r, column=0, columnspan=2, sticky="w"); r += 1
+        _cf = ttk.Frame(frm)
+        _cf.grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
+        ttk.Label(_cf, text="calibration file:").grid(row=0, column=0, sticky="w")
+        _cs = ttk.Combobox(_cf, textvariable=self.vars["calib_source"],
+                           values=["main", "fixed", "contact"],
+                           state="readonly", width=10)
+        _cs.grid(row=0, column=1, sticky="w", padx=(4, 6))
+        self.calsrc_lbl = ttk.Label(_cf, text="", foreground="#555")
+        self.calsrc_lbl.grid(row=0, column=2, sticky="w")
+        _cs.bind("<<ComboboxSelected>>", lambda _e: self._sync_cal_source())
+
+        ttk.Checkbutton(frm, text="Save per-frame mesh CSVs (~98 MB/grasp; "
+                                  "nothing downstream reads them)",
+                        variable=self.vars["log_mesh"]).grid(
+            row=r, column=0, columnspan=2, sticky="w"); r += 1
         ttk.Checkbutton(frm, text="Model the gripper BODY in collision "
                                   "(ur5e_gripper.yml — fingers and pads are "
                                   "never modelled, they must touch)",
@@ -1025,10 +1056,35 @@ class CockpitGUI:
         self.tab_collect.columnconfigure(1, weight=1)
         self.tab_collect.rowconfigure(0, weight=1)
 
+    def _sync_cal_source(self):
+        """Say which file is in force, and refresh the design that depends on it."""
+        p = self._cal_path()
+        want = self.vars["calib_source"].get()
+        got = os.path.basename(p)
+        fell_back = (want != "main" and not got.endswith(f"_{want}.json"))
+        self.calsrc_lbl.config(
+            text=(f"{got}" + ("  (MISSING — using main)" if fell_back else "")),
+            foreground="#a00" if fell_back else "#555")
+        try:
+            self.refresh()
+        except Exception:
+            pass
+
+    def _cal_path(self):
+        """The calibration file currently selected, main if it is missing."""
+        base = os.path.join(PROJECT, "Data", "pad_offset_calibration.json")
+        sfx = {"main": "", "fixed": "_fixed",
+               "contact": "_contact"}.get(self.vars["calib_source"].get(), "")
+        if sfx:
+            p = base.replace(".json", f"{sfx}.json")
+            if os.path.isfile(p):
+                return p
+        return base
+
     def _cal_entry(self):
         """Calibration entry for the current diameter, or None."""
         try:
-            with open(os.path.join(PROJECT, "Data", "pad_offset_calibration.json")) as f:
+            with open(self._cal_path()) as f:
                 cal = json.load(f)
             return cal.get(f"{CYL_D:.1f}")
         except Exception:
@@ -1577,6 +1633,8 @@ class CockpitGUI:
                'GRASP_REACH_CHECK="0" \\\n')
             + ('GRASP_TOOL_COLLISION="1" \\\n'
                if self.vars["tool_collision"].get() else "")
+            + self._cal_read_env()
+            + ("" if self.vars["log_mesh"].get() else 'GRASP_LOG_MESH="0" \\\n')
             + f"{ISAAC_PY} {COLLECT_PY} \\\n"
             f"  --config {CONFIG_JSON}"
         )
@@ -1614,6 +1672,8 @@ class CockpitGUI:
             f'GRASP_REACH_ONLY="1" \\\n'
             + ('GRASP_TOOL_COLLISION="1" \\\n'
                if self.vars["tool_collision"].get() else "")
+            + self._cal_read_env()
+            + ("" if self.vars["log_mesh"].get() else 'GRASP_LOG_MESH="0" \\\n')
             + (f'GRASP_ROT_DEG="{_rot:g}" \\\n'
                f'GRASP_ROT_AXIS="y" \\\n' if abs(_rot) > 1e-6 else "")
             + f"{ISAAC_PY} {COLLECT_PY} \\\n"
@@ -1701,24 +1761,39 @@ class CockpitGUI:
             CYL_L = L
         if not hasattr(self, "obj_cal_lbl"):
             return
+        # READ THE FILE THE DROPDOWN SELECTED, and name it (2026-08-25).
+        # This used to read the main file on a hardcoded path and print a bare
+        # "NOT calibrated", which could contradict what the run actually did:
+        # a batch reading pad_offset_calibration_contact.json collected D26 and
+        # D32 perfectly while this label called both uncalibrated. A status
+        # line that can disagree with the run is worse than none, so it now
+        # follows the same _cal_path() everything else uses and says which file
+        # it looked in and what it found there.
+        _cp = self._cal_path()
+        _err = None
         try:
-            with open(os.path.join(PROJECT, "Data",
-                                   "pad_offset_calibration.json")) as f:
+            with open(_cp) as f:
                 cal = json.load(f)
-        except Exception:
-            cal = {}
+        except FileNotFoundError:
+            cal, _err = {}, "file not found"
+        except Exception as e:
+            cal, _err = {}, f"unreadable ({type(e).__name__})"
         ent = cal.get(f"{CYL_D:.1f}")
+        _fn = os.path.basename(_cp)
         if ent:
             self.obj_cal_lbl.config(
                 text=f"\u00d8{CYL_D:.1f} calibrated  "
                      f"(TOOL_OFFSET_Z {ent.get('TOOL_OFFSET_Z')}, "
-                     f"close_rad {ent.get('close_rad')})",
+                     f"close_rad {ent.get('close_rad')})   [{_fn}]",
                 foreground="#070")
         else:
             est = max(0.05, (85.0 - CYL_D) / 106.0)
+            why = (_err if _err else
+                   (f"{_fn} has " +
+                    (", ".join(sorted(cal, key=float)) if cal else "nothing")))
             self.obj_cal_lbl.config(
-                text=f"\u00d8{CYL_D:.1f} NOT calibrated - collection will "
-                     f"refuse. Calibrate tab first; try "
+                text=f"\u00d8{CYL_D:.1f} NOT in {_fn} - collection will "
+                     f"refuse. ({why}). Calibrate tab first; try "
                      f"GRASP_CLOSE_RAD={est:.3f}",
                 foreground="#b00")
 
@@ -1818,12 +1893,13 @@ class CockpitGUI:
         _md.bind("<<ComboboxSelected>>", lambda _e: self._sync_calib_mode()); r += 1
         ttk.Label(frm, text="signal").grid(row=r, column=0, sticky="e")
         _sig = ttk.Combobox(frm, textvariable=self.vars["contact_signal"],
-                            values=["deformation", "tactile (not available)"],
+                            values=["deformation (mm)", "tactile (counts)"],
                             state="readonly", width=18)
         _sig.grid(row=r, column=1, sticky="w")
         _sig.bind("<<ComboboxSelected>>",
                   lambda _e: self._update_contact_hint()); r += 1
-        ttk.Label(frm, text="target (mm)").grid(row=r, column=0, sticky="e")
+        self.contact_tgt_lbl = ttk.Label(frm, text="target (mm)")
+        self.contact_tgt_lbl.grid(row=r, column=0, sticky="e")
         e = ttk.Entry(frm, textvariable=self.vars["contact_target"], width=10)
         e.grid(row=r, column=1, sticky="w")
         e.bind("<Return>", lambda _e: self._update_contact_hint()); r += 1
@@ -2015,6 +2091,10 @@ class CockpitGUI:
         """Say plainly what the chosen mode will do, and what it will not."""
         mode = self.vars["calib_mode"].get()
         sig = self.vars["contact_signal"].get()
+        if hasattr(self, "contact_tgt_lbl"):
+            self.contact_tgt_lbl.config(
+                text="target (counts)" if sig.startswith("tactile")
+                else "target (mm)")
         if mode.startswith("both"):
             self.contact_lbl.config(
                 text=("Two grasps on this diameter, back to back: one at the "
@@ -2036,19 +2116,28 @@ class CockpitGUI:
                       "entries were made."),
                 foreground="#555")
             return
-        if sig.startswith("tactile"):
-            self.contact_lbl.config(
-                text=("TACTILE IS NOT AVAILABLE. The collector talks to the "
-                      "TSF-85 extension through carb settings and only writes "
-                      "them, so the CNN output cannot be read while the "
-                      "fingers are moving. Choose deformation."),
-                foreground="#a00")
-            return
         try:
             tgt = float(self.vars["contact_target"].get())
         except ValueError:
             self.contact_lbl.config(text="target must be a number.",
                                     foreground="#a00"); return
+        if sig.startswith("tactile"):
+            self.contact_lbl.config(
+                text=(f"Closes until the tactile sum rises {tgt:.0f} counts "
+                      f"above rest — the same quantity tactile_peak_sum in the "
+                      f"calibration file is the maximum of, so compare it "
+                      f"against the 8600-15400 those entries record. Baseline "
+                      f"with the pads open is about 250.\n\nRead live from "
+                      f"the extension in memory (it runs in the same process), "
+                      f"not from the CSV, which only flushes every 50 frames "
+                      f"against a 60-frame close.\n\nCAVEAT: inference is an "
+                      f"async loop that drops queued frames, so the prediction "
+                      f"can lag or go stale. The run refuses to trust a "
+                      f"reading whose frame never advanced and says so in the "
+                      f"log — check for TACTILE WENT STALE.\n\nclose_rad "
+                      f"stays a hard ceiling."),
+                foreground="#06a")
+            return
         self.contact_lbl.config(
             text=(f"Closes until the pad is squashed by {tgt:.2f} mm, then "
                   f"stores THAT angle and offset. Measured after removing the "
@@ -2064,17 +2153,44 @@ class CockpitGUI:
                   f"file is untouched."),
             foreground="#06a")
 
+    def _cal_read_env(self):
+        """Tell the collector to read the SAME calibration file the grid was
+        designed with. Silence here would mean the designer used one offset
+        and the run used another."""
+        sfx = {"fixed": "_fixed", "contact": "_contact"}.get(
+            self.vars["calib_source"].get(), "")
+        return f'GRASP_CAL_READ="{sfx}" \\\n' if sfx else ""
+
+    def _contact_signal_env(self):
+        """The signal + target lines alone, with no CONTACT_CLOSE switch.
+
+        CALIB_BOTH already implies contact closing for its second grasp, so the
+        switch is not wanted there — but the signal and target very much are."""
+        sig = self.vars["contact_signal"].get()
+        try:
+            tgt = float(self.vars["contact_target"].get())
+        except ValueError:
+            tgt = 6000.0 if sig.startswith("tactile") else 1.0
+        if sig.startswith("tactile"):
+            return (f'GRASP_CONTACT_SIGNAL="tactile" \\\n'
+                    f'GRASP_CONTACT_TARGET="{tgt:g}" \\\n')
+        return (f'GRASP_CONTACT_SIGNAL="deformation" \\\n'
+                f'GRASP_CONTACT_TARGET="{tgt/1000.0:g}" \\\n')
+
     def _contact_env(self):
         """The env lines for contact-aware closing, or '' when it is off."""
         if not self.vars["contact_close"].get():
             return ""
         sig = self.vars["contact_signal"].get()
-        if sig.startswith("tactile"):
-            return ""      # not available; _update_contact_hint says why
         try:
             tgt = float(self.vars["contact_target"].get())
         except ValueError:
             return ""
+        if sig.startswith("tactile"):
+            # counts are counts; no unit conversion
+            return (f'GRASP_CONTACT_CLOSE="1" \\\n'
+                    f'GRASP_CONTACT_SIGNAL="tactile" \\\n'
+                    f'GRASP_CONTACT_TARGET="{tgt:g}" \\\n')
         # the GUI field is in mm; the collector works in stage units (m)
         return (f'GRASP_CONTACT_CLOSE="1" \\\n'
                 f'GRASP_CONTACT_SIGNAL="deformation" \\\n'
@@ -2099,15 +2215,12 @@ class CockpitGUI:
         def _one(contact, suffix):
             """One calibrate invocation. contact=None keeps the mode's own
             setting; suffix='' writes the main file."""
-            env = ""
-            if contact:
-                try:
-                    tgt = float(self.vars["contact_target"].get())
-                except ValueError:
-                    tgt = 1.0
-                env = (f'GRASP_CONTACT_CLOSE="1" \\\n'
-                       f'GRASP_CONTACT_SIGNAL="deformation" \\\n'
-                       f'GRASP_CONTACT_TARGET="{tgt/1000.0:g}" \\\n')
+            # ONE place decides the signal and its units (2026-08-25). This
+            # used to hardcode deformation, so picking tactile in the dropdown
+            # produced a deformation command with the tactile target divided by
+            # 1000 — a nonsense number that would still have run.
+            env = ('GRASP_CONTACT_CLOSE="1" \\\n' + self._contact_signal_env()
+                   if contact else "")
             return (
                 f"cd {EXAMPLES_DIR} && \\\n"
                 f'GRASP_OUTPUT_DIR="$HOME/Paper3_Simulation/Data/gui_run" \\\n'
@@ -2128,10 +2241,6 @@ class CockpitGUI:
             # to the contact target, at the same pose in the same session.
             # Everything except the closing is held fixed, which is the whole
             # point of comparing them.
-            try:
-                tgt = float(self.vars["contact_target"].get())
-            except ValueError:
-                tgt = 1.0
             cmd = (
                 f"cd {EXAMPLES_DIR} && \\\n"
                 f'GRASP_OUTPUT_DIR="$HOME/Paper3_Simulation/Data/gui_run" \\\n'
@@ -2139,8 +2248,13 @@ class CockpitGUI:
                 f'GRASP_HEADLESS="{headless}" \\\n'
                 f'GRASP_CALIBRATE="1" \\\n'
                 f'GRASP_CALIB_BOTH="1" \\\n'
-                f'GRASP_CONTACT_SIGNAL="deformation" \\\n'
-                f'GRASP_CONTACT_TARGET="{tgt/1000.0:g}" \\\n'
+                # Built directly, NOT via _contact_env(): that returns nothing
+                # unless contact_close is ticked, and "both" deliberately
+                # leaves it unticked. Calling it here silently dropped the
+                # signal and target, so a run asked to use TACTILE fell back to
+                # the collector's deformation defaults and recorded
+                # signal=deformation, target=0.001 (2026-08-25).
+                + self._contact_signal_env()
                 + (f'GRASP_CLOSE_RAD="{_crad}" \\\n' if _crad else "")
                 + f"{ISAAC_PY} {COLLECT_PY} \\\n"
                 f"  --config {CALIB_CONFIG_JSON}")
@@ -2163,7 +2277,7 @@ class CockpitGUI:
                                  foreground="#0a6")
 
     def show_calibration(self):
-        cal_path = os.path.join(PROJECT, "Data", "pad_offset_calibration.json")
+        cal_path = self._cal_path()   # follow the dropdown, not a fixed name
         self.calib_result.delete("1.0", "end")
         if not os.path.exists(cal_path):
             self.calib_result.insert("end", f"No calibration file yet:\n{cal_path}\n\n"
@@ -2215,7 +2329,8 @@ class CockpitGUI:
             except Exception:
                 pass
         else:
-            lines.append(f"\nCurrent object (\u00d8{CYL_D}): NOT calibrated yet")
+            lines.append(f"\nCurrent object (\u00d8{CYL_D}): NOT in "
+                         f"{os.path.basename(cal_path)}")
         self.calib_result.insert("end", "\n".join(lines))
         self.calib_status.config(text="calibration loaded.", foreground="#0a6")
         self._show_measured = True    # now the green measured pad may draw
@@ -2651,6 +2766,674 @@ class CockpitGUI:
         self.status.config(
             text=("PAD MISMATCH — see report (red)" if any_bad else "pad truth checked"),
             foreground=("#c00" if any_bad else "#0a6"))
+
+
+
+    # ---------- Live Tactile tab ----------
+    # Geometry of one pad, from the constants at the top of this file:
+    # 4 columns of PAD_W/4 = 5.5 mm across, 7 rows of PAD_H/7 = 5.29 mm
+    # along. The pad is therefore 22 x 37 mm -- NOT square, and drawing it
+    # square hides which way a ridge is running, which is the whole point of
+    # looking at it.
+    _LIVE_ROWS, _LIVE_COLS = 7, 4
+    _LIVE_UP = 8                     # upsample factor; the Qt app used 4
+
+    def _build_live_tab(self):
+        """Two pads, live, drawn the way the real rig's Qt app draws them.
+
+        The GUI is a SEPARATE PROCESS from Isaac, so it cannot read the
+        extension's prediction directly -- the collector publishes it to
+        Data/live_tactile.json and this polls the file. That indirection is
+        also why it works headless, mid-batch, and with the Isaac window shut.
+
+        Matched to graphics.cpp on the real rig: view azimuth 250, a 1-cell
+        zero pad before upsampling, and the colour ramp B-b-c-y-r-R at
+        0/.17/.25/.35/.55/.85.
+
+        THE SCALES ARE NOT COMPARABLE with the real rig: that sensor has
+        hysteresis and its own baseline, the CNN has neither."""
+        from matplotlib.colors import LinearSegmentedColormap
+        self._mgl_cmap = LinearSegmentedColormap.from_list("tsf_mgl", [
+            (0.00, (0.00, 0.00, 0.50)),   # B  dark blue
+            (0.17, (0.00, 0.00, 1.00)),   # b  blue
+            (0.25, (0.00, 1.00, 1.00)),   # c  cyan
+            (0.35, (1.00, 1.00, 0.00)),   # y  yellow
+            (0.55, (1.00, 0.00, 0.00)),   # r  red
+            (0.85, (0.50, 0.00, 0.00)),   # R  dark red
+            (1.00, (0.50, 0.00, 0.00))])  # matplotlib needs an endpoint at 1
+
+        outer = ttk.Frame(self.tab_live, padding=8)
+        outer.grid(row=0, column=0, sticky="nsew")
+        self.tab_live.rowconfigure(0, weight=1)
+        self.tab_live.columnconfigure(0, weight=1)
+        outer.rowconfigure(4, weight=1)
+        outer.columnconfigure(0, weight=1)
+
+        # --- row 0: live controls
+        bar = ttk.Frame(outer); bar.grid(row=0, column=0, sticky="w")
+        self.vars["live_on"] = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="LIVE", variable=self.vars["live_on"],
+                        command=self._live_toggle).pack(side="left")
+        self.vars["live_3d"] = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="3D", variable=self.vars["live_3d"],
+                        command=self._live_rebuild).pack(side="left", padx=6)
+        self.vars["live_grid"] = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="taxel grid", variable=self.vars["live_grid"]
+                        ).pack(side="left", padx=6)
+        self.vars["live_autoscale"] = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="auto colour scale",
+                        variable=self.vars["live_autoscale"]).pack(side="left")
+        ttk.Label(bar, text="  colour max (counts):").pack(side="left")
+        self.vars["live_vmax"] = tk.StringVar(value="2000")
+        ttk.Entry(bar, textvariable=self.vars["live_vmax"],
+                  width=7).pack(side="left")
+
+        # --- row 1: baseline
+        bar2 = ttk.Frame(outer); bar2.grid(row=1, column=0, sticky="w",
+                                           pady=(4, 0))
+        ttk.Button(bar2, text="Zero baseline", width=14,
+                   command=self._live_zero).pack(side="left")
+        ttk.Button(bar2, text="Clear baseline", width=14,
+                   command=self._live_unzero).pack(side="left", padx=4)
+        self.live_base_lbl = ttk.Label(bar2, text="no baseline (raw counts)",
+                                       foreground="#555")
+        self.live_base_lbl.pack(side="left", padx=8)
+
+        # --- row 2: record / save
+        bar3 = ttk.Frame(outer); bar3.grid(row=2, column=0, sticky="w",
+                                           pady=(4, 0))
+        self.live_rec_btn = ttk.Button(bar3, text="Record", width=10,
+                                       command=self._live_record_toggle)
+        self.live_rec_btn.pack(side="left")
+        ttk.Label(bar3, text=" name:").pack(side="left")
+        self.vars["live_name"] = tk.StringVar(value="")
+        ttk.Entry(bar3, textvariable=self.vars["live_name"],
+                  width=34).pack(side="left")
+        ttk.Label(bar3, text=" folder:").pack(side="left")
+        self.vars["live_dir"] = tk.StringVar(value="")
+        ttk.Entry(bar3, textvariable=self.vars["live_dir"],
+                  width=34).pack(side="left")
+        ttk.Button(bar3, text="...", width=3,
+                   command=self._live_pick_dir).pack(side="left", padx=2)
+        ttk.Button(bar3, text="Open folder", width=11,
+                   command=self._live_open_dir).pack(side="left", padx=6)
+
+        # --- row 3: offline CSV viewer
+        bar4 = ttk.Frame(outer); bar4.grid(row=3, column=0, sticky="w",
+                                           pady=(4, 2))
+        ttk.Button(bar4, text="Open a saved tactile CSV...", width=26,
+                   command=self._live_open_csv).pack(side="left")
+        self.live_csv_lbl = ttk.Label(bar4, text="", foreground="#555")
+        self.live_csv_lbl.pack(side="left", padx=8)
+
+        self.live_lbl = ttk.Label(outer, text="off", foreground="#555")
+        self.live_lbl.grid(row=5, column=0, sticky="w", pady=(2, 0))
+
+        self.fig_live = Figure(figsize=(11, 4.6), dpi=100)
+        self.canvas_live = FigureCanvasTkAgg(self.fig_live, master=outer)
+        self.canvas_live.get_tk_widget().grid(row=4, column=0, sticky="nsew")
+
+        self._live_after = None
+        self._live_rec = None
+        self._live_seen = None
+        self._live_base = [None, None]
+        self._live_doc = None
+        self._live_rebuild()
+
+    # ---- live helpers ----
+    def _live_rebuild(self):
+        self.fig_live.clear()
+        k = {"projection": "3d"} if self.vars["live_3d"].get() else {}
+        self._live_ax = [self.fig_live.add_subplot(1, 2, i + 1, **k)
+                         for i in range(2)]
+        self.canvas_live.draw_idle()
+        if self._live_doc is not None:
+            self._live_draw(self._live_mats(self._live_doc))
+
+    def _live_toggle(self):
+        if self.vars["live_on"].get():
+            self._live_tick()
+        else:
+            if self._live_after:
+                self.root.after_cancel(self._live_after)
+                self._live_after = None
+            self.live_lbl.config(text="off", foreground="#555")
+
+    @classmethod
+    def _live_upsample(cls, a, factor=None):
+        """Zero-pad by one cell, then CUBIC upsample.
+
+        The Qt app padded and resized x4 with MathGL's own interpolator. Doing
+        the same with linear interpolation gives visible facets, so this uses
+        a Catmull-Rom cubic at x8: smoother than the original, and it needs no
+        SciPy. The pad is what keeps the bump sitting in a flat surround
+        instead of running off the edge."""
+        f = factor or cls._LIVE_UP
+        p = np.zeros((a.shape[0] + 2, a.shape[1] + 2), float)
+        p[1:-1, 1:-1] = a
+
+        def _cr(v, n):                    # Catmull-Rom along one axis
+            m = len(v)
+            x = np.linspace(0, m - 1, n)
+            i = np.clip(np.floor(x).astype(int), 0, m - 2)
+            t = x - i            # 1-D: [:, None] here broadcasts to an (n,n)
+                                 # outer product and plot_surface then gets a
+                                 # 3-D Z
+            g = lambda k: v[np.clip(i + k, 0, m - 1)]
+            p0, p1, p2, p3 = g(-1), g(0), g(1), g(2)
+            t2, t3 = t * t, t * t * t
+            return (0.5 * ((2 * p1) + (-p0 + p2) * t
+                           + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2
+                           + (-p0 + 3 * p1 - 3 * p2 + p3) * t3))
+
+        r, c = p.shape
+        t1 = np.stack([_cr(p[i], c * f) for i in range(r)], axis=0)
+        return np.stack([_cr(t1[:, j], r * f) for j in range(t1.shape[1])],
+                        axis=1)
+
+    def _live_extent_mm(self):
+        """Padded-grid extent in mm, centred on the pad. 4 cols x 5.5 across,
+        7 rows x 5.2857 along, plus one padding cell each side."""
+        py, pz = PAD_W / self._LIVE_COLS, PAD_H / self._LIVE_ROWS
+        w = (self._LIVE_COLS + 2) * py
+        h = (self._LIVE_ROWS + 2) * pz
+        return (-w / 2.0, w / 2.0, -h / 2.0, h / 2.0)
+
+    def _live_mats(self, doc):
+        out = []
+        for i, key in enumerate(("s1", "s2")):
+            v = doc.get(key)
+            if v and len(v) >= 28:
+                m = np.asarray(v[:28], float).reshape(self._LIVE_ROWS,
+                                                      self._LIVE_COLS)
+                if self._live_base[i] is not None:
+                    m = m - self._live_base[i]
+                out.append(m)
+            else:
+                out.append(None)
+        return out
+
+    def _live_zero(self):
+        """Take the current frame as zero — the Qt app's baseline button.
+
+        Subtracting a no-contact frame removes the sensor's own offset, which
+        is the same reason the collection pipeline runs with
+        SUBTRACT_BASELINE. Press it with the pads open and touching nothing."""
+        if self._live_doc is None:
+            messagebox.showinfo("Baseline", "Nothing live to zero yet.")
+            return
+        raw = []
+        for key in ("s1", "s2"):
+            v = self._live_doc.get(key)
+            raw.append(np.asarray(v[:28], float).reshape(
+                self._LIVE_ROWS, self._LIVE_COLS) if v and len(v) >= 28 else None)
+        self._live_base = raw
+        s = [f"{float(np.nansum(r)):.0f}" if r is not None else "-" for r in raw]
+        self.live_base_lbl.config(
+            text=f"baseline set (s1 {s[0]}, s2 {s[1]} counts subtracted)",
+            foreground="#06a")
+
+    def _live_unzero(self):
+        self._live_base = [None, None]
+        self.live_base_lbl.config(text="no baseline (raw counts)",
+                                  foreground="#555")
+
+    def _live_run_dir(self):
+        d = (self.vars["live_dir"].get() or "").strip()
+        if d:
+            return d
+        if self._live_doc and self._live_doc.get("run_dir"):
+            return self._live_doc["run_dir"]
+        return os.path.join(PROJECT, "Data")
+
+    def _live_pick_dir(self):
+        from tkinter import filedialog
+        d = filedialog.askdirectory(title="Save live tactile where?",
+                                    initialdir=self._live_run_dir())
+        if d:
+            self.vars["live_dir"].set(d)
+
+    def _live_open_dir(self):
+        d = self._live_run_dir()
+        try:
+            subprocess.Popen(["xdg-open", d])
+        except Exception as e:
+            messagebox.showinfo("Open folder", f"{d}\n\n({e})")
+
+    def _live_tick(self):
+        path = os.path.join(PROJECT, "Data", "live_tactile.json")
+        try:
+            with open(path) as f:
+                doc = json.load(f)
+        except Exception:
+            doc = None
+        if doc is None:
+            self.live_lbl.config(
+                text=("waiting — no live_tactile.json yet. It appears when a "
+                      "run starts (single or batch, headless or not)."),
+                foreground="#a60")
+        else:
+            self._live_doc = doc
+            if not self.vars["live_dir"].get() and doc.get("run_dir"):
+                self.vars["live_dir"].set(doc["run_dir"])
+            if not self.vars["live_name"].get():
+                self.vars["live_name"].set(
+                    f"live_tactile_{doc.get('run', 'run')}.csv")
+            age = max(0.0, time.time() - float(doc.get("t", 0)))
+            mats = self._live_mats(doc)
+            self._live_draw(mats)
+            if self._live_rec is not None and doc.get("frame_s1") != self._live_seen:
+                self._live_seen = doc.get("frame_s1")
+                row = [f"{doc.get('t', 0):.4f}", str(doc.get("tag", "")),
+                       str(doc.get("phase", "")), str(doc.get("frame_s1"))]
+                for key in ("s1", "s2"):
+                    v = doc.get(key) or [""] * 28
+                    row += [(f"{x:.4f}" if x != "" else "") for x in v[:28]]
+                self._live_rec.write(",".join(row) + "\n")
+                self._live_rec.flush()
+            sums = [float(np.nansum(m)) if m is not None else float("nan")
+                    for m in mats]
+            stale = age > 2.0
+            self.live_lbl.config(
+                text=(f"{doc.get('run', '?')}  {doc.get('tag', '-')}  "
+                      f"{doc.get('phase', '')}   |   s1 sum {sums[0]:.0f}   "
+                      f"s2 sum {sums[1]:.0f}   |   pred frame "
+                      f"{doc.get('frame_s1')}/{doc.get('frame_s2')}   |   "
+                      f"{age:.1f}s old"
+                      + ("   — STALE, no run is publishing" if stale else "")),
+                foreground="#a00" if stale else "#070")
+        if self.vars["live_on"].get():
+            self._live_after = self.root.after(120, self._live_tick)
+
+    def _live_draw(self, mats, titles=("s1 (right pad)", "s2 (left pad)"),
+                   note=None):
+        try:
+            vmax = float(self.vars["live_vmax"].get())
+        except ValueError:
+            vmax = 2000.0
+        if self.vars["live_autoscale"].get():
+            hi = max((float(np.nanmax(m)) for m in mats if m is not None),
+                     default=1.0)
+            vmax = max(50.0, hi)
+        vmin = 0.0
+        if any(m is not None and np.nanmin(m) < 0 for m in mats):
+            vmin = min(float(np.nanmin(m)) for m in mats if m is not None)
+        three = self.vars["live_3d"].get()
+        x0, x1, y0, y1 = self._live_extent_mm()
+        for ax, m, name in zip(self._live_ax, mats, titles):
+            ax.clear()
+            if m is None:
+                ax.set_title(f"{name} — no data", fontsize=9)
+                continue
+            u = self._live_upsample(m)
+            X, Y = np.meshgrid(np.linspace(x0, x1, u.shape[1]),
+                               np.linspace(y0, y1, u.shape[0]))
+            if three:
+                ax.plot_surface(X, Y, u, cmap=self._mgl_cmap, vmin=vmin,
+                                vmax=vmax, linewidth=0, antialiased=True,
+                                rcount=u.shape[0], ccount=u.shape[1])
+                ax.set_zlim(min(0.0, vmin), vmax * 1.05)
+                ax.view_init(elev=30, azim=250)
+                # the pad is 22 x 37 mm: keep that shape so the orientation
+                # of a ridge is readable at a glance
+                ax.set_box_aspect(((x1 - x0), (y1 - y0), 0.55 * (y1 - y0)))
+                ax.set_xlabel("across pad (mm)", fontsize=7, labelpad=-4)
+                ax.set_ylabel("along pad (mm)", fontsize=7, labelpad=-2)
+                ax.set_zlabel("counts", fontsize=7, labelpad=-4)
+                ax.tick_params(labelsize=6, pad=-2)
+            else:
+                ax.imshow(u, cmap=self._mgl_cmap, vmin=vmin, vmax=vmax,
+                          origin="lower", extent=(x0, x1, y0, y1),
+                          interpolation="bilinear", aspect="equal")
+                ax.set_xlabel("across pad (mm)", fontsize=8)
+                ax.set_ylabel("along pad (mm)", fontsize=8)
+                ax.tick_params(labelsize=7)
+                if self.vars["live_grid"].get():
+                    # where the 28 REAL taxels are, under the interpolation:
+                    # 4 columns of PAD_W/4 = 5.5 mm, 7 rows of PAD_H/7 = 5.29
+                    py, pz = PAD_W / self._LIVE_COLS, PAD_H / self._LIVE_ROWS
+                    for k in range(self._LIVE_COLS + 1):
+                        ax.axvline(-PAD_W / 2 + k * py, color="0.45",
+                                   lw=0.6, alpha=0.55)
+                    for k in range(self._LIVE_ROWS + 1):
+                        ax.axhline(-PAD_H / 2 + k * pz, color="0.45",
+                                   lw=0.6, alpha=0.55)
+            ax.set_title(f"{name}   sum {np.nansum(m):.0f}   "
+                         f"max {np.nanmax(m):.0f}", fontsize=9)
+        self.fig_live.suptitle(
+            note or ("live prediction — colours and view match the real-rig Qt "
+                     "app; the SCALES do not (no hysteresis in sim)"),
+            fontsize=8, color="#555")
+        self.fig_live.tight_layout()
+        self.canvas_live.draw_idle()
+
+    def _live_record_toggle(self):
+        if self._live_rec is not None:
+            self._live_rec.close(); self._live_rec = None
+            self.live_rec_btn.config(text="Record")
+            return
+        name = (self.vars["live_name"].get().strip()
+                or f"live_tactile_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+        if not name.lower().endswith(".csv"):
+            name += ".csv"
+        path = os.path.join(self._live_run_dir(), name)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            self._live_rec = open(path, "w")
+            self._live_rec.write("time_sec,tag,phase,frame,"
+                                 + ",".join(f"s1_{i}" for i in range(28)) + ","
+                                 + ",".join(f"s2_{i}" for i in range(28)) + "\n")
+            self._live_seen = None
+            self.live_rec_btn.config(text="Stop rec")
+            self.live_lbl.config(text=f"recording -> {path}", foreground="#06a")
+        except Exception as e:
+            messagebox.showerror("Live", f"Could not open the file:\n{e}")
+
+    def _live_open_csv(self):
+        """Plot a saved tactile CSV, both pads side by side.
+
+        Accepts either the collector's *_sN_tactile_maps.csv (the partner file
+        is found by swapping s1/s2 in the name) or a CSV written by Record
+        here, which already holds both pads.
+
+        It shows the PEAK-SUM frame, not an average: an average over a whole
+        record includes the approach and the release, which drags the picture
+        toward nothing."""
+        from tkinter import filedialog
+        f = filedialog.askopenfilename(
+            title="Open a tactile CSV", initialdir=self._live_run_dir(),
+            filetypes=[("CSV", "*.csv"), ("All", "*.*")])
+        if not f:
+            return
+        try:
+            import csv as _csv
+            with open(f) as fh:
+                rows = list(_csv.reader(fh))
+            hdr, body = rows[0], [r for r in rows[1:] if r]
+            names = [h.strip().lower() for h in hdr]
+
+            def _cols(prefix):
+                idx = [i for i, h in enumerate(names) if h.startswith(prefix)]
+                return idx[:28] if len(idx) >= 28 else None
+
+            i1, i2 = _cols("s1_"), _cols("s2_")
+            if i1 is None:                       # collector format: 28 numbers
+                start = 2 if len(body[0]) >= 30 else 0
+                i1 = list(range(start, start + 28))
+                partner = None
+                base = os.path.basename(f)
+                for a, b in (("_s1_", "_s2_"), ("_s2_", "_s1_")):
+                    if a in base:
+                        cand = os.path.join(os.path.dirname(f),
+                                            base.replace(a, b))
+                        if os.path.isfile(cand):
+                            partner = cand
+                        break
+
+                def _peak(path, idx):
+                    with open(path) as g2:
+                        rs = [r for r in _csv.reader(g2)][1:]
+                    best, bm = -1e18, None
+                    for r in rs:
+                        try:
+                            v = np.array([float(r[k]) for k in idx])
+                        except Exception:
+                            continue
+                        if v.sum() > best:
+                            best, bm = v.sum(), v
+                    return bm
+                m1 = _peak(f, i1)
+                m2 = _peak(partner, i1) if partner else None
+            else:
+                best, m1, m2 = -1e18, None, None
+                for r in body:
+                    try:
+                        v1 = np.array([float(r[k]) for k in i1])
+                        v2 = (np.array([float(r[k]) for k in i2])
+                              if i2 and r[i2[0]] != "" else None)
+                    except Exception:
+                        continue
+                    if v1.sum() > best:
+                        best, m1, m2 = v1.sum(), v1, v2
+
+            mats = [None if v is None else
+                    np.asarray(v, float).reshape(self._LIVE_ROWS, self._LIVE_COLS)
+                    for v in (m1, m2)]
+            if all(m is None for m in mats):
+                raise ValueError("no 28-value rows found")
+            self.vars["live_on"].set(False); self._live_toggle()
+            self._live_draw(mats, note=f"saved file (peak-sum frame): "
+                                       f"{os.path.basename(f)}")
+            self.live_csv_lbl.config(text=os.path.basename(f), foreground="#070")
+        except Exception as e:
+            messagebox.showerror("Open CSV", f"Could not plot that file:\n{e}")
+
+    # ---------- Batch tab (unattended queue) ----------
+    def _build_batch_tab(self):
+        """A queue of SESSION FOLDERS, run one after another, unattended.
+
+        It queues folders the GUI already wrote rather than inventing a batch
+        format, so every item has already passed design_grid's throat, palm,
+        canvas, contact-band and per-point gripper checks before it can be in
+        the list. Nothing is re-validated here and nothing new can be
+        misconfigured here.
+
+        It writes a queue file and a runner script; the run itself happens in a
+        terminal, exactly like every other command this GUI produces. That also
+        means closing the GUI does not kill a 20-hour batch."""
+        outer = ttk.Frame(self.tab_batch, padding=12)
+        outer.grid(row=0, column=0, sticky="nsew")
+        self.tab_batch.rowconfigure(0, weight=1)
+        self.tab_batch.columnconfigure(0, weight=1)
+        outer.rowconfigure(2, weight=1)
+        outer.columnconfigure(0, weight=1)
+        r = 0
+
+        ttk.Label(outer, text="BATCH — run saved configs unattended",
+                  font=("", 11, "bold")).grid(row=r, column=0, columnspan=2,
+                                              sticky="w"); r += 1
+        ttk.Label(outer, wraplength=560, foreground="#555", justify="left",
+                  text=("Set a test up on the Collection tab, press New session, "
+                        "then Save Config — that writes gui_config_used.json into "
+                        "the session folder. Add those folders here, in the order "
+                        "you want them run.\n\nPut the runs you care about most "
+                        "first: a queue that gets cut short then leaves you a "
+                        "usable dataset instead of half of everything.")
+                  ).grid(row=r, column=0, columnspan=2, sticky="w", pady=(2, 8))
+        r += 1
+
+        lf = ttk.Frame(outer)
+        lf.grid(row=r, column=0, columnspan=2, sticky="nsew"); r += 1
+        lf.rowconfigure(0, weight=1); lf.columnconfigure(0, weight=1)
+        self.batch_list = tk.Listbox(lf, height=12, selectmode="extended",
+                                     activestyle="none")
+        self.batch_list.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(lf, orient="vertical",
+                           command=self.batch_list.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        self.batch_list.configure(yscrollcommand=sb.set)
+        self._batch_items = []
+
+        bf = ttk.Frame(outer)
+        bf.grid(row=r, column=0, columnspan=2, sticky="w", pady=6); r += 1
+        for txt, cmd in (("Add folder(s)", self.batch_add),
+                         ("Add ALL in a parent folder", self.batch_add_parent),
+                         ("Remove", self.batch_remove),
+                         ("Up", lambda: self.batch_move(-1)),
+                         ("Down", lambda: self.batch_move(1)),
+                         ("Clear", self.batch_clear)):
+            ttk.Button(bf, text=txt, command=cmd).pack(side="left", padx=2)
+
+        ttk.Separator(outer, orient="horizontal").grid(
+            row=r, column=0, columnspan=2, sticky="ew", pady=8); r += 1
+        ttk.Label(outer, text="SETTINGS — applied to EVERY run in the queue",
+                  font=("", 9, "bold")).grid(row=r, column=0, columnspan=2,
+                                             sticky="w"); r += 1
+        sf = ttk.Frame(outer)
+        sf.grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
+        ttk.Label(sf, text="calibration file:").grid(row=0, column=0, sticky="e")
+        ttk.Combobox(sf, textvariable=self.vars["calib_source"],
+                     values=["main", "fixed", "contact"], state="readonly",
+                     width=10).grid(row=0, column=1, sticky="w", padx=4)
+        ttk.Label(sf, foreground="#555", wraplength=380, justify="left",
+                  text=("one method for the whole dataset — mixing them inside "
+                        "one dataset is exactly what ruins a week")
+                  ).grid(row=0, column=2, sticky="w")
+        ttk.Checkbutton(outer, text="Model the gripper BODY in collision",
+                        variable=self.vars["tool_collision"]).grid(
+            row=r, column=0, columnspan=2, sticky="w"); r += 1
+        ttk.Checkbutton(outer, text="Save per-frame mesh CSVs  (OFF saves "
+                                    "~98 MB/grasp — 59 GB over 20 hours)",
+                        variable=self.vars["batch_log_mesh"]).grid(
+            row=r, column=0, columnspan=2, sticky="w"); r += 1
+
+        ttk.Separator(outer, orient="horizontal").grid(
+            row=r, column=0, columnspan=2, sticky="ew", pady=8); r += 1
+        ttk.Button(outer, text="Write batch + show command",
+                   command=self.batch_write).grid(row=r, column=0, sticky="w")
+        r += 1
+        self.batch_lbl = ttk.Label(outer, text="", foreground="#06a",
+                                   wraplength=560, justify="left")
+        self.batch_lbl.grid(row=r, column=0, columnspan=2, sticky="w",
+                            pady=(6, 0))
+
+    # ---- batch helpers ----
+    def _batch_label(self, folder):
+        """Read the config so the list says what the run IS, not where it lives."""
+        try:
+            with open(os.path.join(folder, "gui_config_used.json")) as f:
+                c = json.load(f)
+            o, p, g = c.get("object", {}), c.get("pad", {}), c.get("grid", {})
+            return (f"\u00d8{o.get('diameter_mm', '?'):g}x{o.get('length_mm', '?'):g}"
+                    f"  roll {p.get('rotation_deg', 0):g}\u00b0"
+                    f"  tilt {o.get('tilt_deg', 0):g}\u00b0"
+                    f"  {g.get('n_points', '?')} pts")
+        except Exception:
+            return "(no gui_config_used.json — will FAIL)"
+
+    def _batch_refresh(self):
+        self.batch_list.delete(0, "end")
+        for i, f in enumerate(self._batch_items, 1):
+            self.batch_list.insert("end",
+                                   f"{i:3d}.  {self._batch_label(f)}    "
+                                   f"[{os.path.basename(f)}]")
+        self.batch_lbl.config(text=f"{len(self._batch_items)} run(s) queued.",
+                              foreground="#06a")
+
+    def batch_add(self):
+        from tkinter import filedialog
+        d = filedialog.askdirectory(
+            title="Pick a session folder (contains gui_config_used.json)",
+            initialdir=(getattr(self, "_run_root", None)
+                        or self._default_run_root()))
+        if d and d not in self._batch_items:
+            self._batch_items.append(d)
+            self._batch_refresh()
+
+    def batch_add_parent(self):
+        """Add every immediate subfolder that has a config, sorted by name."""
+        from tkinter import filedialog
+        d = filedialog.askdirectory(
+            title="Pick the PARENT folder holding several session folders",
+            initialdir=(getattr(self, "_run_root", None)
+                        or self._default_run_root()))
+        if not d:
+            return
+        found = sorted(
+            os.path.join(d, x) for x in os.listdir(d)
+            if os.path.isfile(os.path.join(d, x, "gui_config_used.json")))
+        new = [f for f in found if f not in self._batch_items]
+        self._batch_items.extend(new)
+        self._batch_refresh()
+        self.batch_lbl.config(
+            text=f"added {len(new)} folder(s); {len(self._batch_items)} queued.",
+            foreground="#06a")
+
+    def batch_remove(self):
+        for i in sorted(self.batch_list.curselection(), reverse=True):
+            del self._batch_items[i]
+        self._batch_refresh()
+
+    def batch_move(self, d):
+        sel = list(self.batch_list.curselection())
+        if not sel:
+            return
+        for i in (sel if d < 0 else reversed(sel)):
+            j = i + d
+            if 0 <= j < len(self._batch_items):
+                self._batch_items[i], self._batch_items[j] = \
+                    self._batch_items[j], self._batch_items[i]
+        self._batch_refresh()
+        self.batch_list.selection_clear(0, "end")
+        for i in sel:
+            j = i + d
+            if 0 <= j < len(self._batch_items):
+                self.batch_list.selection_set(j)
+
+    def batch_clear(self):
+        self._batch_items = []
+        self._batch_refresh()
+
+    def batch_write(self):
+        """Write batch_queue.json next to run_batch.py and show the command."""
+        if not self._batch_items:
+            messagebox.showwarning("Batch", "Nothing queued.")
+            return
+        sfx = {"fixed": "_fixed", "contact": "_contact"}.get(
+            self.vars["calib_source"].get(), "")
+        queue = {
+            "generated": time.strftime("%Y%m%d_%H%M%S"),
+            "settings": {
+                "isaac_py": ISAAC_PY, "collect_py": COLLECT_PY,
+                "examples_dir": EXAMPLES_DIR,
+                "cal_read": sfx,
+                "tool_collision": bool(self.vars["tool_collision"].get()),
+                "log_mesh": bool(self.vars["batch_log_mesh"].get())},
+            "items": [{"config": f, "label": self._batch_label(f)}
+                      for f in self._batch_items]}
+        qpath = os.path.join(EXAMPLES_DIR, "batch_queue.json")
+        try:
+            with open(qpath, "w") as f:
+                json.dump(queue, f, indent=2)
+        except Exception as e:
+            messagebox.showerror("Batch", f"Could not write the queue:\n{e}")
+            return
+
+        missing = [f for f in self._batch_items
+                   if not os.path.isfile(os.path.join(f, "gui_config_used.json"))]
+        warn = (f"\n\n{len(missing)} folder(s) have NO gui_config_used.json "
+                f"and will fail — press Save Config in each first."
+                if missing else "")
+        state = os.path.join(EXAMPLES_DIR, "batch_state.json")
+        old = ("\n\nA batch_state.json already exists: re-running RESUMES and "
+               "skips what is already done. Delete it to start over."
+               if os.path.isfile(state) else "")
+
+        cmd = f"cd {EXAMPLES_DIR} && python3 run_batch.py"
+        try:
+            self.root.clipboard_clear(); self.root.clipboard_append(cmd)
+        except Exception:
+            pass
+        self.batch_lbl.config(
+            text=(f"{len(self._batch_items)} run(s) written to "
+                  f"batch_queue.json.\ncommand copied:  {cmd}"
+                  f"\n\nrun_batch.py must be in {EXAMPLES_DIR}."
+                  f"{warn}{old}"),
+            foreground="#a00" if missing else "#0a6")
+        win = tk.Toplevel(self.root)
+        win.title("Batch — copy into a terminal")
+        tk.Label(win, justify="left",
+                 text=("The queue is written. Copy this into a terminal:\n"
+                       "  python3 run_batch.py                 run / resume\n"
+                       "  python3 run_batch.py --status        see progress\n"
+                       "  python3 run_batch.py --retry-failed  retry failures\n"
+                       "\nIt survives closing this GUI. Ctrl-C is safe: the "
+                       "state is on disk, so re-running resumes.")
+                 ).pack(anchor="w", padx=10, pady=(10, 4))
+        txt = tk.Text(win, width=80, height=3, wrap="none")
+        txt.insert("1.0", cmd)
+        txt.pack(padx=10, pady=4)
+        tk.Button(win, text="Close", command=win.destroy).pack(pady=(2, 10))
 
     # ---------- Stitching tab (Block 2) ----------
     def _build_stitch_tab(self):
