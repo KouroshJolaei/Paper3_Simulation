@@ -25,7 +25,7 @@ PREVIEW_TICK_MINOR_MM = 2.0
 import tkinter as tk
 from tkinter import ttk, messagebox
 import numpy as np
-import os, json, subprocess, threading, time, sys
+import os, json, subprocess, threading, time
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.patches as mpatches
@@ -34,16 +34,6 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 # ---- real hardware sizes (mm) ----
-# Where the object's BASE sits, in world mm. Taken from the scene as authored:
-# obj_z 1052.2 with a 140 mm rod puts the base at 1052.2 - 70 = 982.2, which is
-# where the table is. obj_z is the object's CENTRE, so a body of a different
-# length needs a different obj_z to keep its base in the same place -- a 100 mm
-# object left at 1052.2 floats 20 mm above the table (seen 2026-08-27), while
-# pinning the base and leaving obj_z alone puts the CENTRE 20 mm off, which is
-# what the grid designer measures pad_dz from. Deriving obj_z from the length
-# is the only way both are true at once.
-OBJ_BASE_Z = 982.2
-
 PAD_W = 22.0    # pad short side (4 taxels)
 PAD_H = 37.0    # pad long side  (7 taxels)
 # Object size. These stay module-level because ~18 places read them, but they
@@ -403,43 +393,10 @@ def grid_gripper_cloud_gap_mm(offs, pad_dz_mm, tool_offset_z_mm, pad_roll_deg,
     return d.min(axis=1)
 
 
-def contact_band_mm(shape, width_mm, indent_mm=2.4):
-    """Half-extent of the contact patch ON THE OBJECT, across and along.
-
-    This is the one piece of design_grid that is genuinely shape-specific, and
-    getting it wrong is silent: the grid still runs, the maps still stitch, and
-    the outer columns simply grasp less than intended.
-
-    CYLINDER — the surface curves away from a flat pad, so contact is a STRIP
-    whose half-width is set by how far the pad sinks in:
-        sqrt(indent * (D - indent))          (chord of a circle)
-    Along the axis the surface is flat, so the strip runs the pad's full
-    height: no along limit.
-
-    CUBOID / CUBE — a flat face against a flat pad. There is no compliance
-    limit at all: contact is the WHOLE FACE, so the half-band is simply W/2.
-    That is much larger than the cylinder value (17.0 vs 14.1 mm of pad travel
-    at 18 mm; 28.0 vs 17.5 at 40 mm), which is exactly why reusing the
-    cylinder formula would have quietly under-swept every cuboid.
-
-    SPHERE — curves in BOTH directions, so the same chord formula applies
-    across AND along: the contact is a circular patch, not a strip.
-
-    Returns (band_across_mm, band_along_mm); band_along None means unlimited."""
-    W = float(width_mm)
-    chord = float(np.sqrt(max(0.0, indent_mm * (W - indent_mm))))
-    sh = (shape or "cylinder").lower()
-    if sh in ("cuboid", "cube"):
-        return W / 2.0, None
-    if sh == "sphere":
-        return chord, chord
-    return chord, None                        # cylinder
-
-
 def design_grid(diameter_mm, length_mm, tool_offset_z_mm, step_mm=6.0,
                 pad_roll_deg=0.0, indent_mm=2.4, across_margin_mm=3.0,
                 palm_clear_mm=5.0, canvas_mm=96.0, obj_tilt_deg=0.0,
-                obj_tilt_axis="X", shape="cylinder"):
+                obj_tilt_axis="X"):
     """Choose the two grid counts and the base pad height from the OBJECT.
 
     Returns (ok, result_dict, [reason lines]). Every number it picks is
@@ -538,13 +495,11 @@ def design_grid(diameter_mm, length_mm, tool_offset_z_mm, step_mm=6.0,
                    f"(upright would be {PAD_W:.0f} x {PAD_H:.0f})")
 
     # ---- ACROSS -----------------------------------------------------------
-    band, band_along = contact_band_mm(shape, D, indent_mm)
+    band = float(np.sqrt(indent_mm * (D - indent_mm)))
     across_max = pad_hw + band - across_margin_mm
     n_across = int(np.floor(max(0.0, across_max) / step))
-    _bw = ("the whole face, W/2" if (shape or "").lower() in ("cuboid", "cube")
-           else f"sqrt({indent_mm:.1f} x ({D:.1f} - {indent_mm:.1f}))")
-    why.append(f"SHAPE : {shape}")
-    why.append(f"ACROSS: contact band half-width = {_bw} = {band:.2f} mm "
+    why.append(f"ACROSS: contact band half-width = sqrt({indent_mm:.1f} x "
+               f"({D:.1f} - {indent_mm:.1f})) = {band:.2f} mm "
                f"(a {2*band:.1f} mm band)")
     why.append(f"        pad centre may reach {pad_hw:.1f} + {band:.2f} - "
                f"{across_margin_mm:.1f} = {across_max:.2f} mm "
@@ -573,22 +528,8 @@ def design_grid(diameter_mm, length_mm, tool_offset_z_mm, step_mm=6.0,
     span = dz_hi - dz_lo                       # total travel available, mm
     nl_travel = int(np.floor((span / 2.0) / step))
     nl_canvas = int(np.floor((canvas_mm - 2 * pad_hh) / (2 * step)))
-    # A SPHERE also limits the ALONG direction. A cylinder and a cuboid are
-    # flat along their length, so the contact runs the pad's full height and
-    # only the rod end and the canvas matter. A sphere curves both ways: its
-    # contact is a PATCH, so sliding along it leaves the patch just as sliding
-    # across does, and the same band applies.
-    nl_band = 10 ** 6
-    if band_along is not None:
-        along_max = pad_hh + band_along - across_margin_mm
-        nl_band = int(np.floor(max(0.0, along_max) / step))
-        why.append(f"        along band (curved both ways) = "
-                   f"{band_along:.2f} mm -> pad centre may reach "
-                   f"{pad_hh:.1f} + {band_along:.2f} - {across_margin_mm:.1f} "
-                   f"= {along_max:.2f} mm -> n_along <= {nl_band}")
-    n_along = max(0, min(nl_travel, nl_canvas, nl_band))
-    bound = ("contact band" if nl_band <= min(nl_travel, nl_canvas)
-             else ("rod end / palm" if nl_travel <= nl_canvas else "pair canvas"))
+    n_along = max(0, min(nl_travel, nl_canvas))
+    bound = "rod end / palm" if nl_travel <= nl_canvas else "pair canvas"
     why.append(f"        window is {span:.2f} mm wide -> n_along <= "
                f"{nl_travel} by travel, <= {nl_canvas} by the "
                f"{canvas_mm:.0f} mm canvas -> n_along = {n_along} "
@@ -761,9 +702,6 @@ class CockpitGUI:
             "obj_x": tk.StringVar(value="-268.06"),
             "obj_y": tk.StringVar(value="199.0"),
             "obj_z": tk.StringVar(value="1052.2"),
-            # Keep the object's BASE on the table by deriving obj_z from the
-            # length. See OBJ_BASE_Z.
-            "obj_on_table": tk.BooleanVar(value=True),
             "obj_diam": tk.StringVar(value="26.0"),         # object diameter mm
             "obj_len": tk.StringVar(value="140.0"),         # object length   mm
             "obj_tilt_deg": tk.StringVar(value="0.0"),      # 0 = standing
@@ -778,10 +716,7 @@ class CockpitGUI:
             "pad_rot": tk.StringVar(value="0.0"),
             "grid_nx":  tk.StringVar(value="2"),
             "grid_ny":  tk.StringVar(value="3"),
-            # 6 mm, not 8: design_grid's limits were derived and validated at
-            # 6, and at 8 each step's vertical bite is larger, so the along
-            # axis gets trimmed first and you lose points for nothing.
-            "grid_step": tk.StringVar(value="6.0"),   # mm
+            "grid_step": tk.StringVar(value="8.0"),   # mm
             # grid mirrors around the entered pad offset instead of starting there
             "grid_centered": tk.BooleanVar(value=False),
             "grid_pad_frame": tk.BooleanVar(value=True),
@@ -811,25 +746,14 @@ class CockpitGUI:
             # runs with. They must agree: the offsets differ by 0.26 mm on D26
             # between fixed and contact, and a mismatch puts every pad that far
             # off with nothing to show it.
-            # DEFAULT: contact. The contact and fixed files now hold more
-            # diameters than the hand-tuned main file, and mixing methods
-            # inside one dataset is what ruins a week.
-            "calib_source": tk.StringVar(value="contact"),
-            # Object picked from Data/object_library.json. "(scaled cylinder)"
-            # keeps the old behaviour: the scene's unit mesh, scaled.
-            "object_pick": tk.StringVar(value="(scaled cylinder — type the size)"),
+            "calib_source": tk.StringVar(value="main"),
             # Per-frame mesh CSVs: ~98 MB per grasp, and nothing downstream
             # reads them. ON here (single runs are where you might want the
             # diagnostic), OFF in the batch tab.
             "log_mesh": tk.BooleanVar(value=True),
             "batch_log_mesh": tk.BooleanVar(value=False),
             "contact_signal": tk.StringVar(value="deformation (mm)"),
-            # 1.4 mm, not 1.0. A fixed-angle grasp reaches ~1.4-1.5 mm, and
-            # at 1.0 the resulting tactile peak fell UNDER the calibration
-            # sanity band (measured on D18: 7513 against a floor of 8148) and
-            # the entry was refused. 1.4 asks contact-aware to match what the
-            # fixed grasp actually achieves.
-            "contact_target": tk.StringVar(value="1.40"),
+            "contact_target": tk.StringVar(value="1.00"),
             # Emitted as GRASP_TOOL_COLLISION. Default ON: the collector's own
             # log says that without it "a plan that sweeps the FINGERS or the
             # PADS through the object will still look safe", and every run so
@@ -954,40 +878,12 @@ class CockpitGUI:
             ttk.Label(frm, text=lab).grid(row=r, column=0, sticky="e")
             e = ttk.Entry(frm, textvariable=self.vars[key], width=12)
             e.grid(row=r, column=1, sticky="w"); e.bind("<Return>", lambda ev: self.refresh()); r += 1
-        ttk.Checkbutton(frm, text=f"stand on table (z = {OBJ_BASE_Z:g} + "
-                                  f"length/2)",
-                        variable=self.vars["obj_on_table"],
-                        command=lambda: (self._stand_on_table(),
-                                         self.refresh())).grid(
-            row=r, column=0, columnspan=2, sticky="w"); r += 1
         ttk.Label(frm, text="tilt (deg)").grid(row=r, column=0, sticky="e")
         for key, lab in [("obj_diam", "diameter (mm)"), ("obj_len", "length (mm)")]:
             ttk.Label(frm, text=lab).grid(row=r, column=0, sticky="e")
             e = ttk.Entry(frm, textvariable=self.vars[key], width=12)
             e.grid(row=r, column=1, sticky="w")
             e.bind("<Return>", lambda ev: self.refresh()); r += 1
-        # PICK A LIBRARY OBJECT, or leave it on the scaled cylinder. The
-        # scaled path is untouched and stays the default: type a diameter and
-        # a length and the scene's unit mesh becomes that size, exactly as
-        # before. The library is only for shapes that cannot be made by
-        # scaling a cylinder.
-        ttk.Label(frm, text="object").grid(row=r, column=0, sticky="e")
-        self._obj_last = self.OBJ_NONE
-        self._obj_last_ok = self.OBJ_NONE
-        self.obj_pick_cb = ttk.Combobox(
-            frm, textvariable=self.vars["object_pick"],
-            values=self._obj_choices(), state="readonly", width=38,
-            # rebuilt every time the list is opened, so regenerating
-            # object_library.json needs no button and no restart
-            postcommand=lambda: self.obj_pick_cb.config(
-                values=self._obj_choices()))
-        self.obj_pick_cb.grid(row=r, column=1, sticky="w")
-        self.obj_pick_cb.bind("<<ComboboxSelected>>", self._obj_pick); r += 1
-        self.obj_pick_lbl = ttk.Label(frm, text="", foreground="#555",
-                                      wraplength=250, justify="left")
-        self.obj_pick_lbl.grid(row=r, column=0, columnspan=2, sticky="w")
-        r += 1
-
         self.obj_cal_lbl = ttk.Label(frm, text="", foreground="#555",
                                      wraplength=250)
         self.obj_cal_lbl.grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
@@ -1173,186 +1069,6 @@ class CockpitGUI:
             self.refresh()
         except Exception:
             pass
-
-    OBJ_NONE = "(scaled cylinder — type the size)"
-
-    def _obj_library(self):
-        """Data/object_library.json, or {} — built by build_object_library.py."""
-        if getattr(self, "_objlib_cache", None) is not None:
-            return self._objlib_cache
-        try:
-            with open(os.path.join(PROJECT, "Data",
-                                   "object_library.json")) as f:
-                self._objlib_cache = json.load(f)
-        except Exception:
-            self._objlib_cache = {}
-        return self._objlib_cache
-
-    # Family order for the list: cylinders first (the shape everything has
-    # been validated on), then cuboids, cubes, spheres. Within a family,
-    # smallest grasp width first, and an upright object before the same object
-    # lying down.
-    _OBJ_FAMILY_ORDER = ("cylinder", "cuboid", "cube", "sphere")
-
-    def _stand_on_table(self):
-        """Set obj_z (the object's CENTRE) so its base rests on the table."""
-        if not self.vars.get("obj_on_table") or not self.vars["obj_on_table"].get():
-            return
-        try:
-            L = float(self.vars["obj_len"].get())
-        except ValueError:
-            return
-        self.vars["obj_z"].set(f"{OBJ_BASE_Z + L / 2.0:.1f}")
-
-    def _picked_shape(self):
-        """The shape family of the selected object.
-
-        The scaled path is always a cylinder; a library object carries its own
-        family. Without this every cuboid would be designed on the cylinder
-        band and the outer columns would quietly under-grasp."""
-        raw = self.vars["object_pick"].get()
-        name = getattr(self, "_obj_by_label", {}).get(raw)
-        e = self._obj_library().get(name) if name else None
-        return (e or {}).get("shape", "cylinder")
-
-    def _obj_label(self, name, e):
-        """A label that says which object this is AND what it will set.
-
-        The label is only ever shown; the mapping back to a file goes through
-        _obj_by_label, never through parsing this string. Parsing display text
-        is how picking one cylinder left the diameter on another object's
-        value (2026-08-27)."""
-        stem = name[:-4] if name.lower().endswith(".usd") else name
-        w, L = e.get("grasp_width_mm", 0), e.get("body_length_mm", 0)
-        pose = "lying" if e.get("horizontal") else "upright"
-        tag = "" if e.get("runnable") else "   [needs calibration]"
-        return f"{stem:<16} {w:g} x {L:g} mm  {pose}{tag}"
-
-    def _obj_choices(self):
-        """Build the list and the label -> filename map together."""
-        lib = self._obj_library()
-
-        def _key(kv):
-            k, e = kv
-            fam = e.get("shape", "?")
-            try:
-                fi = self._OBJ_FAMILY_ORDER.index(fam)
-            except ValueError:
-                fi = len(self._OBJ_FAMILY_ORDER)
-            return (fi, float(e.get("grasp_width_mm", 0)),
-                    float(e.get("body_length_mm", 0)),
-                    1 if e.get("horizontal") else 0)
-
-        self._obj_by_label = {}
-        out = [self.OBJ_NONE]
-        last_fam = None
-        for k, e in sorted(lib.items(), key=_key):
-            fam = e.get("shape", "?")
-            if fam != last_fam:
-                out.append(f"--- {fam.upper()} " + "-" * 30)   # a divider
-                last_fam = fam
-            lab = self._obj_label(k, e)
-            self._obj_by_label[lab] = k
-            out.append(lab)
-        return out
-
-    def _obj_pick(self, _e=None):
-        """Fill diameter, length and pad height from the chosen library entry."""
-        raw = self.vars["object_pick"].get()
-        # Dividers and un-runnable entries must never BECOME the selection,
-        # and must never become what we revert to either -- otherwise picking a
-        # divider drops you onto the last thing you were refused.
-        if raw.startswith("---"):
-            self.vars["object_pick"].set(self._obj_last_ok or self.OBJ_NONE)
-            return
-        name = getattr(self, "_obj_by_label", {}).get(raw)
-        lib = self._obj_library()
-        if raw == self.OBJ_NONE or name is None or name not in lib:
-            prev = getattr(self, "_obj_prev", None)
-            if prev:
-                for k, v in prev.items():
-                    self.vars[k].set(v)
-                self._obj_prev = None
-            self._obj_last_ok = self.OBJ_NONE
-            self.obj_pick_lbl.config(
-                text=("SCALED CYLINDER: type the diameter and length above and "
-                      "the scene's unit mesh becomes that size — exactly as "
-                      "before the library existed."
-                      + ("  (size restored; pad_dz left as you set it)"
-                         if prev else "")),
-                foreground="#555")
-            try:
-                self.refresh()
-            except Exception:
-                pass
-            return
-
-        e = lib[name]
-        if not e.get("runnable"):
-            # SELECTABLE ANYWAY (2026-08-27). Refusing the selection blocked
-            # the only route that could make it runnable: you cannot calibrate
-            # an object you cannot pick. So the size IS applied -- the Calibrate
-            # tab needs it, and its close_rad estimate is derived from the
-            # diameter -- while pad_dz is left alone, because the height cannot
-            # be computed without the throat and calibration entries and a
-            # made-up one is exactly the number that produced peak-4 maps.
-            if getattr(self, "_obj_prev", None) is None:
-                self._obj_prev = {k: self.vars[k].get()
-                                  for k in ("obj_diam", "obj_len")}
-            self.vars["obj_diam"].set(f"{e['grasp_width_mm']:g}")
-            self.vars["obj_len"].set(f"{e['body_length_mm']:g}")
-            self._stand_on_table()
-            self._obj_last_ok = raw
-            self.obj_pick_lbl.config(
-                text=(f"SIZE APPLIED ({e['grasp_width_mm']:g} x "
-                      f"{e['body_length_mm']:g} mm) — but NOT YET RUNNABLE: "
-                      + "; ".join(e.get("missing", []))
-                      + ".\nUse the Calibrate tab on this object now; "
-                        "pad_dz is left as-is because it cannot be computed "
-                        "without those entries. Collection will refuse until "
-                        "the calibration exists."),
-                foreground="#a60")
-            try:
-                self.refresh()
-            except Exception:
-                pass
-            return
-
-        if getattr(self, "_obj_prev", None) is None:
-            self._obj_prev = {k: self.vars[k].get()
-                              for k in ("obj_diam", "obj_len")}
-        self.vars["obj_diam"].set(f"{e['grasp_width_mm']:g}")
-        self.vars["obj_len"].set(f"{e['body_length_mm']:g}")
-        self._stand_on_table()
-        self.vars["pad_dz"].set(f"{e['pad_dz_suggested_mm']:.2f}")
-        self._obj_last_ok = raw
-        self.obj_pick_lbl.config(
-            text=(f"APPLIED [{e['shape']}]: width {e['grasp_width_mm']:g} mm, length "
-                  f"{e['body_length_mm']:g} mm, pad_dz "
-                  f"{e['pad_dz_suggested_mm']:.2f} mm "
-                  f"(window {e['pad_dz_floor_mm']:.1f}.."
-                  f"{e['pad_dz_ceiling_mm']:.1f}, bound by {e['bound_by']})"
-                  + ("\nlying down: the long axis is Y, not Z"
-                     if e["horizontal"] else "")),
-            foreground="#070")
-        try:
-            self.refresh()
-        except Exception:
-            pass
-
-    def _obj_env(self):
-        """GRASP_OBJECT_USD / _CENTRE_MM for the chosen object, or ''."""
-        raw = self.vars["object_pick"].get()
-        name = getattr(self, "_obj_by_label", {}).get(raw)
-        e = self._obj_library().get(name) if name else None
-        # NOT gated on "runnable": an uncalibrated object still has to be the
-        # thing loaded into the scene when you calibrate it. Collection is
-        # blocked elsewhere, by the missing calibration entry itself.
-        if raw == self.OBJ_NONE or not e:
-            return ""
-        c = e["centre_offset_mm"]
-        return (f'GRASP_OBJECT_USD="{e["usd"]}" \\\n'
-                f'GRASP_OBJECT_CENTRE_MM="{c[0]:g},{c[1]:g},{c[2]:g}" \\\n')
 
     def _cal_path(self):
         """The calibration file currently selected, main if it is missing."""
@@ -1918,7 +1634,6 @@ class CockpitGUI:
             + ('GRASP_TOOL_COLLISION="1" \\\n'
                if self.vars["tool_collision"].get() else "")
             + self._cal_read_env()
-            + self._obj_env()
             + ("" if self.vars["log_mesh"].get() else 'GRASP_LOG_MESH="0" \\\n')
             + f"{ISAAC_PY} {COLLECT_PY} \\\n"
             f"  --config {CONFIG_JSON}"
@@ -1958,7 +1673,6 @@ class CockpitGUI:
             + ('GRASP_TOOL_COLLISION="1" \\\n'
                if self.vars["tool_collision"].get() else "")
             + self._cal_read_env()
-            + self._obj_env()
             + ("" if self.vars["log_mesh"].get() else 'GRASP_LOG_MESH="0" \\\n')
             + (f'GRASP_ROT_DEG="{_rot:g}" \\\n'
                f'GRASP_ROT_AXIS="y" \\\n' if abs(_rot) > 1e-6 else "")
@@ -2209,28 +1923,6 @@ class CockpitGUI:
 
         ttk.Separator(frm, orient="horizontal").grid(
             row=r, column=0, columnspan=2, sticky="ew", pady=8); r += 1
-        # ---- AFTER CALIBRATING A NEW WIDTH ----------------------------
-        ttk.Separator(frm, orient="horizontal").grid(
-            row=r, column=0, columnspan=2, sticky="ew", pady=8); r += 1
-        ttk.Label(frm, text="AFTER CALIBRATING A NEW WIDTH",
-                  font=("", 9, "bold")).grid(row=r, column=0, columnspan=2,
-                                             sticky="w"); r += 1
-        ttk.Label(frm, wraplength=250, foreground="#555", justify="left",
-                  text=("A new width needs a THROAT measurement before the "
-                        "grid designer will accept it, and the object library "
-                        "has to be rebuilt to pick both up. Not needed when "
-                        "re-calibrating a width you already had.")
-                  ).grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
-        ttk.Button(frm, text="1. Throat probe command", width=24,
-                   command=self._show_throat_cmd).grid(
-            row=r, column=0, columnspan=2, sticky="w", pady=(2, 0)); r += 1
-        ttk.Button(frm, text="2. Rebuild object library", width=24,
-                   command=self._rebuild_library).grid(
-            row=r, column=0, columnspan=2, sticky="w"); r += 1
-        self.lib_lbl = ttk.Label(frm, text="", foreground="#555",
-                                 wraplength=250, justify="left")
-        self.lib_lbl.grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
-
         ttk.Label(frm, text="AFTER the calibrate run:",
                   font=("", 9, "bold")).grid(row=r, column=0, columnspan=2, sticky="w"); r += 1
         ttk.Button(frm, text="Load calibration result",
@@ -2504,51 +2196,6 @@ class CockpitGUI:
                 f'GRASP_CONTACT_SIGNAL="deformation" \\\n'
                 f'GRASP_CONTACT_TARGET="{tgt/1000.0:g}" \\\n')
 
-    def _show_throat_cmd(self):
-        """The throat probe needs Isaac, so it is a terminal command rather
-        than a button that silently spends a minute."""
-        cmd = (f"cd {EXAMPLES_DIR} && GRASP_HEADLESS=1 {ISAAC_PY} "
-               f"probe_finger_throat.py")
-        try:
-            self.root.clipboard_clear(); self.root.clipboard_append(cmd)
-        except Exception:
-            pass
-        win = tk.Toplevel(self.root)
-        win.title("Throat probe — copy into a terminal")
-        tk.Label(win, justify="left",
-                 text=("Measures how deep the gripper's throat lets each "
-                       "calibrated width go.\nIt reads close_rad from all "
-                       "three calibration files, so a width must be\n"
-                       "CALIBRATED FIRST. About a minute, headless.\n\n"
-                       "Then press 'Rebuild object library'.")
-                 ).pack(anchor="w", padx=10, pady=(10, 4))
-        t = tk.Text(win, width=78, height=2, wrap="none")
-        t.insert("1.0", cmd); t.pack(padx=10, pady=4)
-        tk.Button(win, text="Close", command=win.destroy).pack(pady=(2, 10))
-
-    def _rebuild_library(self):
-        """Pure python and quick, so this one just runs."""
-        script = os.path.join(PROJECT, "Data", "build_object_library.py")
-        if not os.path.isfile(script):
-            self.lib_lbl.config(text=f"not found: {script}", foreground="#a00")
-            return
-        try:
-            out = subprocess.run([sys.executable, script],
-                                 capture_output=True, text=True, timeout=120,
-                                 cwd=os.path.dirname(script))
-            txt = (out.stdout or "") + (out.stderr or "")
-            ready = [ln for ln in txt.splitlines() if "READY NOW" in ln]
-            self._objlib_cache = None          # so the dropdown re-reads it
-            try:
-                self.obj_pick_cb.config(values=self._obj_choices())
-            except Exception:
-                pass
-            self.lib_lbl.config(
-                text=(ready[0].strip() if ready else txt.strip()[-220:]),
-                foreground="#070" if out.returncode == 0 else "#a00")
-        except Exception as e:
-            self.lib_lbl.config(text=f"failed: {e}", foreground="#a00")
-
     def save_and_show_calib_cmd(self):
         cfg = self.build_calib_config()
         if cfg is None:
@@ -2581,11 +2228,6 @@ class CockpitGUI:
                 f'GRASP_HEADLESS="{headless}" \\\n'
                 f'GRASP_CALIBRATE="1" \\\n'
                 + env
-                # Calibrate the object you PICKED, not a scaled cylinder of the
-                # same width: a 100 mm body and a 140 mm body put their top ends
-                # at different depths inside the gripper, and the calibration
-                # grasp has to happen on the real thing.
-                + self._obj_env()
                 + (f'GRASP_CAL_SUFFIX="{suffix}" \\\n' if suffix else "")
                 + (f'GRASP_CLOSE_RAD="{_crad}" \\\n' if _crad else "")
                 + f"{ISAAC_PY} {COLLECT_PY} \\\n"
@@ -2606,11 +2248,6 @@ class CockpitGUI:
                 f'GRASP_HEADLESS="{headless}" \\\n'
                 f'GRASP_CALIBRATE="1" \\\n'
                 f'GRASP_CALIB_BOTH="1" \\\n'
-                # calibrate the object that is PICKED, not a scaled cylinder of
-                # the same width: body length changes how deep the top end sits
-                # in the gripper, and the calibration grasp must be on the real
-                # object
-                + self._obj_env()
                 # Built directly, NOT via _contact_env(): that returns nothing
                 # unless contact_close is ticked, and "both" deliberately
                 # leaves it unticked. Calling it here silently dropped the
@@ -4010,8 +3647,7 @@ class CockpitGUI:
                 CYL_D, CYL_L, float(cal["TOOL_OFFSET_Z"]) * 1000.0,
                 step_mm=step, pad_roll_deg=roll,
                 obj_tilt_deg=float(cfg.get("tilt_deg", 0.0)),
-                obj_tilt_axis=str(cfg.get("tilt_axis", "X")),
-                shape=self._picked_shape())
+                obj_tilt_axis=str(cfg.get("tilt_axis", "X")))
             text = "\n".join(why)
             if not ok:
                 self.design_lbl.config(text="design REFUSED — see dialog",

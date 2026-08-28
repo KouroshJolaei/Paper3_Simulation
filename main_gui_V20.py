@@ -403,43 +403,10 @@ def grid_gripper_cloud_gap_mm(offs, pad_dz_mm, tool_offset_z_mm, pad_roll_deg,
     return d.min(axis=1)
 
 
-def contact_band_mm(shape, width_mm, indent_mm=2.4):
-    """Half-extent of the contact patch ON THE OBJECT, across and along.
-
-    This is the one piece of design_grid that is genuinely shape-specific, and
-    getting it wrong is silent: the grid still runs, the maps still stitch, and
-    the outer columns simply grasp less than intended.
-
-    CYLINDER — the surface curves away from a flat pad, so contact is a STRIP
-    whose half-width is set by how far the pad sinks in:
-        sqrt(indent * (D - indent))          (chord of a circle)
-    Along the axis the surface is flat, so the strip runs the pad's full
-    height: no along limit.
-
-    CUBOID / CUBE — a flat face against a flat pad. There is no compliance
-    limit at all: contact is the WHOLE FACE, so the half-band is simply W/2.
-    That is much larger than the cylinder value (17.0 vs 14.1 mm of pad travel
-    at 18 mm; 28.0 vs 17.5 at 40 mm), which is exactly why reusing the
-    cylinder formula would have quietly under-swept every cuboid.
-
-    SPHERE — curves in BOTH directions, so the same chord formula applies
-    across AND along: the contact is a circular patch, not a strip.
-
-    Returns (band_across_mm, band_along_mm); band_along None means unlimited."""
-    W = float(width_mm)
-    chord = float(np.sqrt(max(0.0, indent_mm * (W - indent_mm))))
-    sh = (shape or "cylinder").lower()
-    if sh in ("cuboid", "cube"):
-        return W / 2.0, None
-    if sh == "sphere":
-        return chord, chord
-    return chord, None                        # cylinder
-
-
 def design_grid(diameter_mm, length_mm, tool_offset_z_mm, step_mm=6.0,
                 pad_roll_deg=0.0, indent_mm=2.4, across_margin_mm=3.0,
                 palm_clear_mm=5.0, canvas_mm=96.0, obj_tilt_deg=0.0,
-                obj_tilt_axis="X", shape="cylinder"):
+                obj_tilt_axis="X"):
     """Choose the two grid counts and the base pad height from the OBJECT.
 
     Returns (ok, result_dict, [reason lines]). Every number it picks is
@@ -538,13 +505,11 @@ def design_grid(diameter_mm, length_mm, tool_offset_z_mm, step_mm=6.0,
                    f"(upright would be {PAD_W:.0f} x {PAD_H:.0f})")
 
     # ---- ACROSS -----------------------------------------------------------
-    band, band_along = contact_band_mm(shape, D, indent_mm)
+    band = float(np.sqrt(indent_mm * (D - indent_mm)))
     across_max = pad_hw + band - across_margin_mm
     n_across = int(np.floor(max(0.0, across_max) / step))
-    _bw = ("the whole face, W/2" if (shape or "").lower() in ("cuboid", "cube")
-           else f"sqrt({indent_mm:.1f} x ({D:.1f} - {indent_mm:.1f}))")
-    why.append(f"SHAPE : {shape}")
-    why.append(f"ACROSS: contact band half-width = {_bw} = {band:.2f} mm "
+    why.append(f"ACROSS: contact band half-width = sqrt({indent_mm:.1f} x "
+               f"({D:.1f} - {indent_mm:.1f})) = {band:.2f} mm "
                f"(a {2*band:.1f} mm band)")
     why.append(f"        pad centre may reach {pad_hw:.1f} + {band:.2f} - "
                f"{across_margin_mm:.1f} = {across_max:.2f} mm "
@@ -573,22 +538,8 @@ def design_grid(diameter_mm, length_mm, tool_offset_z_mm, step_mm=6.0,
     span = dz_hi - dz_lo                       # total travel available, mm
     nl_travel = int(np.floor((span / 2.0) / step))
     nl_canvas = int(np.floor((canvas_mm - 2 * pad_hh) / (2 * step)))
-    # A SPHERE also limits the ALONG direction. A cylinder and a cuboid are
-    # flat along their length, so the contact runs the pad's full height and
-    # only the rod end and the canvas matter. A sphere curves both ways: its
-    # contact is a PATCH, so sliding along it leaves the patch just as sliding
-    # across does, and the same band applies.
-    nl_band = 10 ** 6
-    if band_along is not None:
-        along_max = pad_hh + band_along - across_margin_mm
-        nl_band = int(np.floor(max(0.0, along_max) / step))
-        why.append(f"        along band (curved both ways) = "
-                   f"{band_along:.2f} mm -> pad centre may reach "
-                   f"{pad_hh:.1f} + {band_along:.2f} - {across_margin_mm:.1f} "
-                   f"= {along_max:.2f} mm -> n_along <= {nl_band}")
-    n_along = max(0, min(nl_travel, nl_canvas, nl_band))
-    bound = ("contact band" if nl_band <= min(nl_travel, nl_canvas)
-             else ("rod end / palm" if nl_travel <= nl_canvas else "pair canvas"))
+    n_along = max(0, min(nl_travel, nl_canvas))
+    bound = "rod end / palm" if nl_travel <= nl_canvas else "pair canvas"
     why.append(f"        window is {span:.2f} mm wide -> n_along <= "
                f"{nl_travel} by travel, <= {nl_canvas} by the "
                f"{canvas_mm:.0f} mm canvas -> n_along = {n_along} "
@@ -1204,17 +1155,6 @@ class CockpitGUI:
             return
         self.vars["obj_z"].set(f"{OBJ_BASE_Z + L / 2.0:.1f}")
 
-    def _picked_shape(self):
-        """The shape family of the selected object.
-
-        The scaled path is always a cylinder; a library object carries its own
-        family. Without this every cuboid would be designed on the cylinder
-        band and the outer columns would quietly under-grasp."""
-        raw = self.vars["object_pick"].get()
-        name = getattr(self, "_obj_by_label", {}).get(raw)
-        e = self._obj_library().get(name) if name else None
-        return (e or {}).get("shape", "cylinder")
-
     def _obj_label(self, name, e):
         """A label that says which object this is AND what it will set.
 
@@ -1327,7 +1267,7 @@ class CockpitGUI:
         self.vars["pad_dz"].set(f"{e['pad_dz_suggested_mm']:.2f}")
         self._obj_last_ok = raw
         self.obj_pick_lbl.config(
-            text=(f"APPLIED [{e['shape']}]: width {e['grasp_width_mm']:g} mm, length "
+            text=(f"APPLIED: diameter {e['grasp_width_mm']:g} mm, length "
                   f"{e['body_length_mm']:g} mm, pad_dz "
                   f"{e['pad_dz_suggested_mm']:.2f} mm "
                   f"(window {e['pad_dz_floor_mm']:.1f}.."
@@ -4010,8 +3950,7 @@ class CockpitGUI:
                 CYL_D, CYL_L, float(cal["TOOL_OFFSET_Z"]) * 1000.0,
                 step_mm=step, pad_roll_deg=roll,
                 obj_tilt_deg=float(cfg.get("tilt_deg", 0.0)),
-                obj_tilt_axis=str(cfg.get("tilt_axis", "X")),
-                shape=self._picked_shape())
+                obj_tilt_axis=str(cfg.get("tilt_axis", "X")))
             text = "\n".join(why)
             if not ok:
                 self.design_lbl.config(text="design REFUSED — see dialog",

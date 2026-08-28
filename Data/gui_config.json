@@ -3,105 +3,35 @@
     "center_world_mm": [
       -268.06,
       199.0,
-      1052.2
+      1032.2
     ],
     "tilt_deg": 0.0,
     "tilt_axis": "X",
     "shape": "cylinder",
-    "diameter_mm": 26.0,
-    "length_mm": 140.0
+    "diameter_mm": 18.0,
+    "length_mm": 100.0
   },
   "pad": {
     "base_offset_y_mm": 0.0,
-    "base_offset_z_mm": 31.43,
+    "base_offset_z_mm": 8.12,
     "x_fixed_centered": true,
     "rotation_deg": 0.0,
     "rotation_axis": "y"
   },
   "grid": {
-    "nx": 2,
+    "nx": 1,
     "ny": 1,
-    "step_mm": 8.0,
-    "centered": true,
+    "step_mm": 6.0,
+    "centered": false,
     "step_frame": "pad",
     "step_roll_deg": 0.0,
-    "n_points": 15
+    "n_points": 1
   },
   "points": [
     {
       "index": 0,
       "pad_offset_y_mm": 0.0,
-      "pad_offset_z_mm": 31.43
-    },
-    {
-      "index": 1,
-      "pad_offset_y_mm": -8.0,
-      "pad_offset_z_mm": 15.43
-    },
-    {
-      "index": 2,
-      "pad_offset_y_mm": -8.0,
-      "pad_offset_z_mm": 23.43
-    },
-    {
-      "index": 3,
-      "pad_offset_y_mm": -8.0,
-      "pad_offset_z_mm": 31.43
-    },
-    {
-      "index": 4,
-      "pad_offset_y_mm": -8.0,
-      "pad_offset_z_mm": 39.43
-    },
-    {
-      "index": 5,
-      "pad_offset_y_mm": -8.0,
-      "pad_offset_z_mm": 47.43
-    },
-    {
-      "index": 6,
-      "pad_offset_y_mm": 0.0,
-      "pad_offset_z_mm": 47.43
-    },
-    {
-      "index": 7,
-      "pad_offset_y_mm": 0.0,
-      "pad_offset_z_mm": 39.43
-    },
-    {
-      "index": 8,
-      "pad_offset_y_mm": 0.0,
-      "pad_offset_z_mm": 23.43
-    },
-    {
-      "index": 9,
-      "pad_offset_y_mm": 0.0,
-      "pad_offset_z_mm": 15.43
-    },
-    {
-      "index": 10,
-      "pad_offset_y_mm": 8.0,
-      "pad_offset_z_mm": 15.43
-    },
-    {
-      "index": 11,
-      "pad_offset_y_mm": 8.0,
-      "pad_offset_z_mm": 23.43
-    },
-    {
-      "index": 12,
-      "pad_offset_y_mm": 8.0,
-      "pad_offset_z_mm": 31.43
-    },
-    {
-      "index": 13,
-      "pad_offset_y_mm": 8.0,
-      "pad_offset_z_mm": 39.43
-    },
-    {
-      "index": 14,
-      "pad_offset_y_mm": 8.0,
-      "pad_offset_z_mm": 47.43
+      "pad_offset_z_mm": 8.12
     }
   ]
 }
