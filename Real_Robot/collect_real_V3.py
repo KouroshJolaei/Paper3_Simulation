@@ -96,11 +96,6 @@ ap.add_argument("--baseline-s", type=float, default=1.5,
 ap.add_argument("--settle-s", type=float, default=0.5)
 ap.add_argument("--max-joint-step-deg", type=float, default=15.0)
 ap.add_argument("--pose-tol-mm", type=float, default=1.0)
-ap.add_argument("--cal-file", default=None,
-                help="calibration json to read. Default: the CONTACT file, "
-                     "because that is the method the whole sim dataset was "
-                     "standardised on and mixing methods inside one dataset "
-                     "is what ruins a week.")
 ap.add_argument("--allow-sim-cal", action="store_true",
                 help="run with the SIM calibration when no real entry exists. "
                      "Recorded as calibration_source=sim_fallback.")
@@ -491,37 +486,17 @@ def write_tactile_csv(path, rows):
 
 
 # ------------------------------------------------------------ calibration -
-def cal_key(width_mm, shape):
-    """How a calibration entry is named, IDENTICAL to the sim's convention:
-    a bare width for a cylinder, "width|shape" for anything else.
-
-    Cylinders keep the bare key so every entry measured before shapes existed
-    still reads. There is deliberately NO cross-shape fallback: a flat face
-    trips a contact target far earlier than a round one, so a cuboid that
-    quietly borrowed a cylinder's close_rad would be squeezed differently
-    with nothing in the files to show it."""
-    sh = str(shape or "cylinder").strip().lower()
-    return (f"{float(width_mm):.1f}" if sh == "cylinder"
-            else f"{float(width_mm):.1f}|{sh}")
-
-
-def load_calibration(width_mm, shape="cylinder"):
+def load_calibration(diameter_mm):
     """(tool_offset_z_m, source). Refuses without a real entry unless
     --allow-sim-cal, because TOOL_OFFSET_Z is what the stitcher paints with."""
-    key = cal_key(width_mm, shape)
-    path = args.cal_file or os.path.join(
-        PROJECT, "Data", "pad_offset_calibration_contact.json")
+    key = f"{float(diameter_mm):.1f}"
     cal = {}
-    if os.path.exists(path):
+    if os.path.exists(CAL_PATH):
         try:
-            with open(path) as f:
+            with open(CAL_PATH) as f:
                 cal = json.load(f)
         except Exception as e:
-            print(f"[cal] could not read {path}: {e}")
-    else:
-        print(f"[cal] no calibration file at {path}")
-    print(f"[cal] file {os.path.basename(path)}  key '{key}'")
-    globals()["CAL_PATH"] = path
+            print(f"[cal] could not read {CAL_PATH}: {e}")
 
     # Preferred: an entry recorded on the REAL rig. Two layouts are accepted
     # so the file can gain the rig key without breaking the sim's reader:
@@ -537,7 +512,7 @@ def load_calibration(width_mm, shape="cylinder"):
             kk for kk, vv in cal.items()
             if isinstance(vv, dict) and str(vv.get("rig", "")).lower() == "real"]
         raise SystemExit(
-            f"\nREFUSING TO RUN: no REAL calibration for key '{key}'.\n"
+            f"\nREFUSING TO RUN: no REAL calibration for \u00d8{key} mm.\n"
             f"  file: {CAL_PATH}\n"
             f"  real entries present: {have or 'none'}\n\n"
             f"TOOL_OFFSET_Z is the flange->pad distance the stitcher paints\n"
@@ -549,22 +524,12 @@ def load_calibration(width_mm, shape="cylinder"):
             f"to proceed knowingly (recorded as calibration_source=sim_fallback).")
 
     if key in cal and isinstance(cal[key], dict) and "TOOL_OFFSET_Z" in cal[key]:
-        print(f"[cal] !! using SIM calibration for key '{key}' — NOT verified "
+        print(f"[cal] !! using SIM calibration for \u00d8{key} — NOT verified "
               f"on hardware")
         return float(cal[key]["TOOL_OFFSET_Z"]), "sim_fallback"
-    # No entry at all. The old behaviour was to fall back to the Oe26 sim
-    # number, which is a DIFFERENT OBJECT's flange-to-pad distance -- across
-    # the calibrated widths TOOL_OFFSET_Z spans 0.1468 to 0.1572 m, so the
-    # wrong entry is worth up to 10 mm of pad position. That is not a fallback,
-    # it is a wrong number that looks normal.
-    raise SystemExit(
-        f"\nREFUSING TO RUN: no calibration entry at all for key '{key}'.\n"
-        f"  file: {CAL_PATH}\n"
-        f"  keys present: {sorted(k for k in cal if isinstance(cal[k], dict))}\n\n"
-        f"--allow-sim-cal lets you borrow the SIM entry for this object; it\n"
-        f"cannot invent one for an object that was never calibrated at all.\n"
-        f"Calibrate it in the GUI first, or point --cal-file at the file that\n"
-        f"holds it.")
+    print(f"[cal] !! no entry at all for \u00d8{key}; using the \u00d826 sim "
+          f"value 0.15657 — NOT verified on hardware")
+    return 0.15657, "sim_fallback_default"
 
 
 # ------------------------------------------------------------------ main --
@@ -572,21 +537,7 @@ def main():
     with open(args.config) as f:
         cfg = json.load(f)
     obj = cfg["object"]
-    # SHAPE (added 2026-09-05). The designer has always written shape,
-    # across_mm and length_mm; this file read only diameter_mm, so every
-    # cuboid config was silently run as a cylinder and looked for a bare
-    # calibration key that does not exist. Same fault class as run_batch.py:
-    # the config knew more than the code read.
-    shape = str(obj.get("shape", "cylinder")).strip().lower()
-    if shape not in ("cylinder", "cuboid", "cube"):
-        raise SystemExit(
-            f"\nREFUSING: shape '{shape}' is not supported on the real rig.\n"
-            f"Cylinder and cuboid are; a sphere has never been calibrated or\n"
-            f"grasped even in simulation.")
-    grip_mm = float(obj["diameter_mm"])          # what the JAW closes on
-    across_mm = float(obj.get("across_mm", grip_mm))   # across the pad
-    along_mm = float(obj.get("length_mm", 0.0))        # along the pad
-    diam = grip_mm                               # kept: used for the run name
+    diam = float(obj["diameter_mm"])
     obj_c_world = np.array(obj["center_world_mm"], float)
     pad_rot = float((cfg.get("pad") or {}).get("rotation_deg", 0.0))
     pts = cfg.get("points", [])
@@ -604,23 +555,17 @@ def main():
             f"correction for the flange-to-pad lever arm). Use an upright "
             f"config, or verify roll separately first.")
 
-    tool_z, cal_src = load_calibration(grip_mm, shape)
+    tool_z, cal_src = load_calibration(diam)
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = args.run_dir or os.path.join(
-        REAL_ROOT, f"run_{stamp}_real_{shape}{int(grip_mm)}"
-        f"_pad{int(round(pad_rot))}")
+        REAL_ROOT, f"run_{stamp}_real_obj{int(diam)}_pad{int(round(pad_rot))}")
     base = args.basename
 
     print("\n=== REAL COLLECTION ========================================")
     print(f"  config      : {args.config}")
-    if shape == "cylinder":
-        print(f"  object      : cylinder \u00d8{grip_mm:.1f} x {along_mm:.1f} "
-              f"mm at world {obj_c_world.tolist()}")
-    else:
-        print(f"  object      : {shape} {grip_mm:.1f} (grip) x "
-              f"{across_mm:.1f} (across) x {along_mm:.1f} (along) mm "
-              f"at world {obj_c_world.tolist()}")
+    print(f"  object      : \u00d8{diam:.1f} x {obj.get('length_mm', '?')} mm "
+          f"at world {obj_c_world.tolist()}")
     print(f"  object base : {np.round(w2b(obj_c_world), 2).tolist()} mm "
           f"(base_link)")
     print(f"  points      : {len(pts)}")
@@ -819,12 +764,7 @@ def main():
     with open(os.path.join(run_dir, "reachability_report.json"), "w") as f:
         json.dump({"generated": stamp, "config": args.config,
                    "object_center_mm": obj_c_world.tolist(),
-                   "shape": shape,
-                   "diameter_mm": grip_mm,
-                   "across_mm": across_mm,
-                   "length_mm": along_mm,
-                   "calibration_file": os.path.basename(CAL_PATH),
-                   "calibration_key": cal_key(grip_mm, shape),
+                   "diameter_mm": diam,
                    "TOOL_OFFSET_Z": tool_z,
                    "calibration_source": cal_src,
                    "rig": "real",
@@ -1070,9 +1010,6 @@ def main():
         with open(os.path.join(run_dir, "execution_ledger.json"), "w") as f:
             json.dump({"generated": stamp, "config": args.config, "rig": "real",
                        "calibration_source": cal_src,
-                       "shape": shape,
-                       "calibration_key": cal_key(grip_mm, shape),
-                       "calibration_file": os.path.basename(CAL_PATH),
                        "point_to_point": bool(args.p2p),
                        "p2p_max_mm": float(args.p2p_max_mm),
                        "arrival_tol_mm": float(args.arrival_tol_mm),

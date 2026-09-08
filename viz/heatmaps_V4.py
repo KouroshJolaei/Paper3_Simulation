@@ -56,7 +56,7 @@ except Exception:                                    # standalone fallback
             return pd.read_csv(path, error_bad_lines=False,
                                warn_bad_lines=False)
 
-MIRROR_S2 = False     # show s2 mirrored L-R (the two pads face each other)
+MIRROR_S2 = True     # show s2 mirrored L-R (the two pads face each other)
 
 # ---------------------------------------------------- expected patch ------
 # A measured 7x4 on its own cannot say whether a round blob is round because
@@ -73,7 +73,7 @@ SHOW_EXPECTED_PANEL = True
 #     2 * sqrt(INDENT * (D - INDENT))
 # which gives 15.05 mm at D=26 -- matching the 15.0 mm fitted from a real
 # upright run -- and 8.5 mm at D=10. The number used is printed on the panel.
-INDENT_MM = 1.4
+INDENT_MM = 2.4
 BAND_WIDTH_MM = None      # None = derive from the rod's diameter (above)
 
 # The pad's OUTER TIP -- the free end of the finger, furthest from the palm.
@@ -91,16 +91,6 @@ def _band_width_mm(scene):
         return float(BAND_WIDTH_MM), "set"
     try:
         d = float(scene["d"])
-        shape = str(scene.get("shape", "cylinder")).lower()
-        # A FLAT FACE HAS NO COMPLIANCE BAND (2026-08-28). The chord formula
-        # below is the half-width of the strip a flat pad makes on a CURVED
-        # surface. A cuboid's face is flat against a flat pad, so the contact
-        # is the whole face and the band is simply its width. Using the chord
-        # here predicted 16.3 mm on a 120 mm face, which the pad -- anchored
-        # 32 mm off centre to reach the edge -- never touched, so the
-        # "expected" panel came out empty.
-        if shape in ("cuboid", "cube"):
-            return d, f"whole {d:.0f} mm face"
         if d > 2 * INDENT_MM:
             return (2.0 * float(np.sqrt(INDENT_MM * (d - INDENT_MM))),
                     f"from \u00d8{d:.0f}")

@@ -831,20 +831,26 @@ def design_grid(diameter_mm, length_mm, tool_offset_z_mm, step_mm=6.0,
                                        D if band_width_mm is None
                                        else float(band_width_mm), indent_mm)
     across_max = pad_hw + band - across_margin_mm
+    na_band = int(np.floor(max(0.0, across_max) / step))
     # THE CANVAS CAPS THE ACROSS COUNT TOO (2026-08-27). The along count has
     # always been capped this way; across never was, because a cylinder's band
     # is small enough that it could not get close. A flat face has no such
     # limit: a 120 mm-wide cuboid allows 154 mm of sweep against a 96 mm
     # canvas, and the design was REFUSED at the very end with "swept area
     # exceeds the pair canvas" instead of simply being trimmed to fit.
+    na_canvas = int(np.floor((canvas_mm - 2 * pad_hw) / (2 * step)))
+    n_across = max(0, min(na_band, na_canvas))
     _bw = ("the whole face, W/2" if (shape or "").lower() in ("cuboid", "cube")
            else f"sqrt({indent_mm:.1f} x ({D:.1f} - {indent_mm:.1f}))")
     why.append(f"SHAPE : {shape}")
     why.append(f"ACROSS: contact band half-width = {_bw} = {band:.2f} mm "
                f"(a {2*band:.1f} mm band)")
     why.append(f"        pad centre may reach {pad_hw:.1f} + {band:.2f} - "
-               f"{across_margin_mm:.1f} = {across_max:.2f} mm from the "
-               f"object's across axis")
+               f"{across_margin_mm:.1f} = {across_max:.2f} mm "
+               f"-> n_across <= {na_band} by the band, <= {na_canvas} by the "
+               f"{canvas_mm:.0f} mm canvas -> n_across = {n_across}"
+               + ("  (bound by the CANVAS, not the object)"
+                  if na_canvas < na_band else ""))
 
     # ---- ALONG: the feasible window for the pad centre ---------------------
     # palm_z = pad_z + (TOOL_OFFSET_Z - 86.69); it must clear the rod top.
@@ -873,93 +879,24 @@ def design_grid(diameter_mm, length_mm, tool_offset_z_mm, step_mm=6.0,
             f"(the window closes when L/2 > {palm_above_pad - palm_clear_mm + pad_hh:.1f} mm)."]
 
     span = dz_hi - dz_lo                       # total travel available, mm
-    along_max = span / 2.0                     # half-window, about pad_dz
+    nl_travel = int(np.floor((span / 2.0) / step))
+    nl_canvas = int(np.floor((canvas_mm - 2 * pad_hh) / (2 * step)))
     # A SPHERE also limits the ALONG direction. A cylinder and a cuboid are
     # flat along their length, so the contact runs the pad's full height and
     # only the rod end and the canvas matter. A sphere curves both ways: its
     # contact is a PATCH, so sliding along it leaves the patch just as sliding
     # across does, and the same band applies.
+    nl_band = 10 ** 6
     if band_along is not None:
-        # A SPHERE curves both ways, so sliding ALONG leaves the patch exactly
-        # as sliding across does. Whichever of the two ceilings binds first.
-        along_band_max = pad_hh + band_along - across_margin_mm
+        along_max = pad_hh + band_along - across_margin_mm
+        nl_band = int(np.floor(max(0.0, along_max) / step))
         why.append(f"        along band (curved both ways) = "
                    f"{band_along:.2f} mm -> pad centre may reach "
                    f"{pad_hh:.1f} + {band_along:.2f} - {across_margin_mm:.1f} "
-                   f"= {along_band_max:.2f} mm")
-        along_max = min(along_max, along_band_max)
-
-    # ---- THE COUNTS ARE SOLVED TOGETHER, NOT SEPARATELY -------------------
-    # THE FAULT THIS FIXES (2026-09-05). Every limit above is stated in the
-    # OBJECT's frame: the band constrains motion ACROSS the object, the palm
-    # and the ends constrain motion ALONG it. But _offsets builds the lattice
-    # and then calls rotate_offsets(offs, pad_roll_deg), which turns the
-    # lattice into the PAD's frame AFTER those limits have been applied. At
-    # 0 deg the rotation is the identity and nothing is wrong, which is why
-    # this survived every upright design ever made. At 90 deg it TRANSPOSES
-    # them: the count derived from the along-window lands across the object
-    # and vice versa.
-    #
-    # Measured on a Oe26 x 140 design at 90 deg roll: across_max was 23.03 mm
-    # and the sweep reached +-36.0 mm in the object's across direction, while
-    # only +-18.0 mm of the +-36.0 mm along-window was used. The two spans
-    # were simply swapped, and 42 of its 91 points could not touch the rod at
-    # all. Nothing refused; the maps would have stitched; the outer columns
-    # would just have been empty.
-    #
-    # THE GENERAL RULE. A lattice of (n_a, n_l) steps of `step`, rotated by
-    # phi, reaches its extremes at the corner:
-    #     across = step * (n_a*|cos phi| + n_l*|sin phi|)
-    #     along  = step * (n_a*|sin phi| + n_l*|cos phi|)
-    # so the two counts are COUPLED at every angle except 0 and 90, and no
-    # pair of independent ceilings can express that. Solved by search instead:
-    # take the largest point count whose corner satisfies every limit. The
-    # search is trivially small and exact, and at 0 deg it returns precisely
-    # what the old independent arithmetic returned, so upright designs are
-    # bit-identical.
-    #
-    # phi is measured against the OBJECT, not the world: tilting the rod
-    # rotates its across direction just as rolling the pad rotates the grid,
-    # and only the angle BETWEEN them decides how the sweep projects.
-    _obj_tilt = (float(obj_tilt_deg)
-                 if str(obj_tilt_axis).upper() == "X" else 0.0)
-    phi = np.radians(float(pad_roll_deg) - _obj_tilt)
-    cph, sph = abs(np.cos(phi)), abs(np.sin(phi))
-    # the CANVAS is pinned in world axes, so it keeps the world roll
-    cw, sw = c, s
-
-    def _fits(na_, nl_):
-        ra = step * (na_ * cph + nl_ * sph)          # reach across the object
-        rl = step * (na_ * sph + nl_ * cph)          # reach along it
-        cy = step * (na_ * cw + nl_ * sw) + pad_hw   # world Y half-extent
-        cz = step * (na_ * sw + nl_ * cw) + pad_hh   # world Z half-extent
-        return (ra <= across_max + 1e-9 and rl <= along_max + 1e-9
-                and cy <= canvas_mm / 2.0 + 1e-9 and cz <= canvas_mm / 2.0 + 1e-9)
-
-    _cap = int(np.ceil(max(across_max, along_max, canvas_mm) / step)) + 2
-    n_across = n_along = 0
-    # (point count, squareness) -- most points wins; ties go to the squarer
-    # grid, because a long thin sweep covers the same canvas with a worse
-    # spread of anchors. (0, 0) is always feasible, so this cannot fail.
-    _best = (1, 0)
-    for _na in range(_cap + 1):
-        for _nl in range(_cap + 1):
-            if not _fits(_na, _nl):
-                continue
-            _key = ((2 * _na + 1) * (2 * _nl + 1), -abs(_na - _nl))
-            if _key > _best:
-                _best, n_across, n_along = _key, _na, _nl
-    if abs(float(pad_roll_deg) - _obj_tilt) > 1e-6:
-        why.append(f"        ROLLED {pad_roll_deg:+.1f} deg vs object tilt "
-                   f"{_obj_tilt:+.1f} -> the two counts are COUPLED "
-                   f"(|cos| {cph:.3f}, |sin| {sph:.3f}); solved together")
-    why.append(f"        reach across = {step*(n_across*cph + n_along*sph):.2f} "
-               f"/ {across_max:.2f} mm ; reach along = "
-               f"{step*(n_across*sph + n_along*cph):.2f} / {along_max:.2f} mm")
-    bound = ("contact band" if band_along is not None
-             and along_max < span / 2.0 else "rod end / palm / canvas")
-    nl_travel = int(np.floor(along_max / step))
-    nl_canvas = int(np.floor((canvas_mm - 2 * pad_hh) / (2 * step)))
+                   f"= {along_max:.2f} mm -> n_along <= {nl_band}")
+    n_along = max(0, min(nl_travel, nl_canvas, nl_band))
+    bound = ("contact band" if nl_band <= min(nl_travel, nl_canvas)
+             else ("rod end / palm" if nl_travel <= nl_canvas else "pair canvas"))
     if end_overhang:
         why.append(f"        END OVERHANG ON: the pad may hang past the end "
                    f"until only {across_margin_mm:.0f} mm still touches — the "
@@ -1138,9 +1075,6 @@ def design_grid(diameter_mm, length_mm, tool_offset_z_mm, step_mm=6.0,
 
     return True, {"n_across": n_across, "n_along": n_along,
                   "pad_dy_edge_mm": round(pad_dy_edge, 2),
-                  # how far the pad CENTRE may sit from the object's across
-                  # axis and still touch. The caller gates a typed y on it.
-                  "across_max_mm": round(across_max, 2),
                   "step_mm": step, "pad_dz_mm": pad_dz,
                   "n_points": n_pts, "band_mm": 2 * band,
                   "swept_mm": (used_y, used_z), "bound_by": bound,
@@ -1267,19 +1201,6 @@ class CockpitGUI:
             # project is scaled the same way.
             "scale_shared": tk.BooleanVar(value=True),
             "scale_fixed":  tk.StringVar(value=""),   # blank = not fixed  # Stitch-tab: include GSR in validation
-
-            # ---- Real Robot tab -------------------------------------------
-            # Defaults are the combination proven in free air on 2026-09-05:
-            # 9/9 grasps, arrivals 0.026-0.169 mm, tilt 0.00 deg.
-            "real_home_here":      tk.BooleanVar(value=True),
-            "real_home_vertical":  tk.BooleanVar(value=True),
-            "real_home_above":     tk.BooleanVar(value=True),
-            "real_object_here":    tk.BooleanVar(value=True),
-            "real_allow_sim_cal":  tk.BooleanVar(value=True),
-            "real_max_tilt":       tk.StringVar(value="0.5"),
-            "real_speed":          tk.StringVar(value="3"),
-            "real_arrival":        tk.StringVar(value="1.0"),
-            "real_use_session":    tk.BooleanVar(value=True),
         }
 
         # ---- Notebook: tab 1 = collection cockpit, tab 2 = stitching ----
@@ -1292,12 +1213,10 @@ class CockpitGUI:
         self.tab_batch = ttk.Frame(self.nb)
         self.tab_stitch = ttk.Frame(self.nb)
         self.tab_calib = ttk.Frame(self.nb)
-        self.tab_real = ttk.Frame(self.nb)
         self.nb.add(self.tab_collect, text="Collection")
         self.nb.add(self.tab_calib, text="Calibrate")
         self.nb.add(self.tab_live, text="Live Tactile")
         self.nb.add(self.tab_batch, text="Batch")
-        self.nb.add(self.tab_real, text="Real Robot")
         self.nb.add(self.tab_stitch, text="Stitching (Block 2)")
 
         self._build_inputs()
@@ -1306,7 +1225,6 @@ class CockpitGUI:
         self._build_batch_tab()
         self._build_stitch_tab()
         self._build_calib_tab()
-        self._build_real_tab()
         self.refresh()
 
     def _build_inputs(self):
@@ -2477,12 +2395,6 @@ class CockpitGUI:
                 os.makedirs(_sess, exist_ok=True)
                 with open(os.path.join(_sess, "gui_config_used.json"), "w") as f:
                     json.dump(cfg, f, indent=2)
-                # the design reasons belong next to the design they explain
-                _rep = getattr(self, "_last_design_report", None)
-                if _rep:
-                    with open(os.path.join(_sess,
-                                           "design_grid_report.txt"), "w") as f:
-                        f.write(_rep + "\n")
                 try:
                     self.fig.savefig(os.path.join(_sess, "gui_preview.png"),
                                      dpi=110, bbox_inches="tight")
@@ -4567,376 +4479,6 @@ class CockpitGUI:
         tk.Button(win, text="Close", command=win.destroy).pack(pady=(2, 10))
 
     # ---------- Stitching tab (Block 2) ----------
-    # ==================================================================== #
-    #  REAL ROBOT                                                          #
-    # ==================================================================== #
-    REAL_PREFLIGHT = [
-        ("PENDANT", "Load AND RUN external_control4 on the teach pendant.",
-         None),
-        ("PENDANT", "Confirm no protective stop is showing.", None),
-        ("ping", "Reach the arm before launching anything else.",
-         "ping -c 4 192.168.1.101"),
-        ("Terminal 1", "ur_robot_driver — the arm itself.",
-         "source /opt/ros/humble/setup.bash && source ~/ur5e_ws_Gripper/install/"
-         "setup.bash && ros2 launch ur_robot_driver ur_control.launch.py "
-         "ur_type:=ur5e robot_ip:=192.168.1.101 use_fake_hardware:=false "
-         "launch_rviz:=false use_sim_time:=false "
-         "description_package:=ur_description_gripper "
-         "description_file:=ur.urdf.xacro"),
-        ("Terminal 2", "MoveIt — provides /compute_fk and /compute_ik, which "
-         "collect_real.py calls for every point.",
-         "source /opt/ros/humble/setup.bash && source ~/ur5e_ws_Gripper/install/"
-         "setup.bash && ros2 launch ur_moveit_config ur_moveit.launch.py "
-         "ur_type:=ur5e launch_rviz:=true use_sim_time:=false "
-         "description_package:=ur_description_gripper "
-         "description_file:=ur.urdf.xacro"),
-        ("Terminal 3", "gripper bridge — DO2 opens, DO3 closes.",
-         "source /opt/ros/humble/setup.bash && source ~/ur5e_ws_Gripper/install/"
-         "setup.bash && python3 ~/ur5e_ws_Gripper/bridges/"
-         "gripper_moveit_bridge.py"),
-        ("Terminal 4", "activate the trajectory controller.",
-         "source /opt/ros/humble/setup.bash && source ~/ur5e_ws_Gripper/install/"
-         "setup.bash && ros2 service call /controller_manager/switch_controller"
-         " controller_manager_msgs/srv/SwitchController \"{activate_controllers:"
-         " [\'scaled_joint_trajectory_controller\'], deactivate_controllers: [],"
-         " strictness: 2}\""),
-        ("Terminal 5", "VERIFY it is active — this is the check, not the "
-         "launch.",
-         "ros2 control list_controllers -c /controller_manager | grep scaled"),
-        ("Tactile", "Start the Qt app FRESH. Measured 2026-09-05: a newly "
-         "started server ran at 21 Hz, a stale one at 1.4 Hz, and the hold "
-         "window is built from whatever frames arrive.",
-         "cd /home/kourosh/Pipeline_ws/ros2_ws/TactileSensorUi/TactileSensorUI "
-         "&& qtcreator /home/kourosh/Pipeline_ws/ros2_ws/TactileSensorUi/"
-         "TactileSensorUI/TactileSensorUI.pro &"),
-    ]
-
-    def _build_real_tab(self):
-        """Everything that is REAL-RIG-ONLY, and nothing else.
-
-        The object, its dimensions, its pose, the grid, the steps and the pad
-        roll are all designed on the Collection tab exactly as before, and
-        Save Config writes Data/gui_config.json. collect_real.py reads that
-        same file. So this tab adds no second way to describe an object and
-        cannot disagree with the sim about one -- it only holds the things
-        that have no meaning in Isaac: which home to start from, whether to
-        straighten the wrist, and how the cell is brought up.
-
-        IT DOES NOT MOVE THE ROBOT. Like every other command this GUI
-        produces, it writes a line for you to paste into a terminal, so the
-        'type GO to confirm' prompt, the live log and Ctrl-C all stay in front
-        of you rather than behind a button."""
-        outer = ttk.Frame(self.tab_real, padding=12)
-        outer.grid(row=0, column=0, sticky="nsew")
-        self.tab_real.rowconfigure(0, weight=1)
-        self.tab_real.columnconfigure(0, weight=1)
-        outer.columnconfigure(0, weight=1)
-        r = 0
-
-        ttk.Label(outer, text="REAL ROBOT — run the designed grid on the UR5e",
-                  font=("", 11, "bold")).grid(row=r, column=0, sticky="w")
-        r += 1
-        ttk.Label(outer, wraplength=620, foreground="#555", justify="left",
-                  text=("Design the object and the grid on the Collection tab "
-                        "and press Save Config, exactly as for a sim run. This "
-                        "tab adds only what the real cell needs.\n\nNothing "
-                        "here commands the arm: it builds a command you paste "
-                        "into a terminal.")
-                  ).grid(row=r, column=0, sticky="w", pady=(2, 10)); r += 1
-
-        # ---- what the saved config says -----------------------------------
-        box = ttk.LabelFrame(outer, text="  the config this will run  ",
-                             padding=8)
-        box.grid(row=r, column=0, sticky="ew"); r += 1
-        box.columnconfigure(0, weight=1)
-        self.real_cfg_lbl = ttk.Label(box, justify="left", font=("TkFixedFont",
-                                                                 9))
-        self.real_cfg_lbl.grid(row=0, column=0, sticky="w")
-        ttk.Button(box, text="Re-read",
-                   command=self._real_refresh).grid(row=0, column=1,
-                                                    sticky="e", padx=(8, 0))
-        ttk.Checkbutton(box, text="read and write inside my SESSION folder "
-                                  "(Collection tab)",
-                        variable=self.vars["real_use_session"],
-                        command=self._real_refresh
-                        ).grid(row=1, column=0, columnspan=2, sticky="w",
-                               pady=(6, 0))
-
-        # ---- home and wrist ------------------------------------------------
-        hb = ttk.LabelFrame(outer, text="  home pose  ", padding=8)
-        hb.grid(row=r, column=0, sticky="ew", pady=(10, 0)); r += 1
-        ttk.Checkbutton(hb, text="home HERE — use the arm's current joints",
-                        variable=self.vars["real_home_here"]
-                        ).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(hb, text="straighten the WRIST — force the tool axis "
-                                 "vertical, keeping yaw",
-                        variable=self.vars["real_home_vertical"]
-                        ).grid(row=1, column=0, sticky="w")
-        ttk.Checkbutton(hb, text="home ABOVE the object — start over the first "
-                                 "grid point, as Isaac does",
-                        variable=self.vars["real_home_above"]
-                        ).grid(row=2, column=0, sticky="w")
-        ttk.Checkbutton(hb, text="object HERE — put pt00 exactly where the pad "
-                                 "is now (measures the object)",
-                        variable=self.vars["real_object_here"]
-                        ).grid(row=3, column=0, sticky="w")
-        tf = ttk.Frame(hb); tf.grid(row=4, column=0, sticky="w", pady=(6, 0))
-        ttk.Label(tf, text="refuse above tilt (deg):").grid(row=0, column=0)
-        ttk.Entry(tf, width=6, textvariable=self.vars["real_max_tilt"]
-                  ).grid(row=0, column=1, padx=(4, 12))
-        ttk.Label(tf, text="speed (mm/s):").grid(row=0, column=2)
-        ttk.Entry(tf, width=6, textvariable=self.vars["real_speed"]
-                  ).grid(row=0, column=3, padx=(4, 12))
-        ttk.Label(tf, text="arrival limit (mm):").grid(row=0, column=4)
-        ttk.Entry(tf, width=6, textvariable=self.vars["real_arrival"]
-                  ).grid(row=0, column=5, padx=(4, 0))
-        ttk.Label(hb, wraplength=600, foreground="#555", justify="left",
-                  text=("The tilt limit is a refusal, not a warning: every "
-                        "grid point is commanded at the home orientation, so a "
-                        "tilted home meets the object at that angle at every "
-                        "point. Measured 2026-09-05: a jogged home read 2.64 "
-                        "deg, which is 7.2 mm of pad offset over the 156 mm "
-                        "flange-to-pad lever.")
-                  ).grid(row=5, column=0, sticky="w", pady=(6, 0))
-
-        cb = ttk.LabelFrame(outer, text="  calibration  ", padding=8)
-        cb.grid(row=r, column=0, sticky="ew", pady=(10, 0)); r += 1
-        ttk.Checkbutton(cb, text="allow the SIM calibration (recorded as "
-                                 "sim_fallback in every output)",
-                        variable=self.vars["real_allow_sim_cal"]
-                        ).grid(row=0, column=0, sticky="w")
-        ttk.Label(cb, wraplength=600, foreground="#555", justify="left",
-                  text=("TOOL_OFFSET_Z is the flange-to-pad distance the "
-                        "stitcher paints every map with. The sim value came "
-                        "from simulated contact, so until this object is "
-                        "calibrated on the real rig every real map carries a "
-                        "constant unverified offset. Leave this ON for free-air "
-                        "tests; turn it OFF once a real entry exists.")
-                  ).grid(row=1, column=0, sticky="w", pady=(4, 0))
-
-        # ---- buttons --------------------------------------------------------
-        bf = ttk.Frame(outer)
-        bf.grid(row=r, column=0, sticky="w", pady=(12, 0)); r += 1
-        ttk.Button(bf, text="Pre-flight checklist",
-                   command=self._real_preflight).grid(row=0, column=0)
-        ttk.Button(bf, text="Show DRY-RUN command",
-                   command=lambda: self._real_command(go=False)
-                   ).grid(row=0, column=1, padx=(8, 0))
-        ttk.Button(bf, text="Show RUN command (moves the arm)",
-                   command=lambda: self._real_command(go=True)
-                   ).grid(row=0, column=2, padx=(8, 0))
-
-        self.real_msg = ttk.Label(outer, wraplength=620, justify="left")
-        self.real_msg.grid(row=r, column=0, sticky="w", pady=(10, 0)); r += 1
-        self._real_refresh()
-
-    def _real_config_path(self):
-        """Which config file the real run will read.
-
-        The SESSION copy when there is a session, because that is the file the
-        run folder is judged against afterwards and the one Save Config wrote
-        alongside the preview. Data/gui_config.json is a scratch file that the
-        next Save Config overwrites, so a real run pointed at it could not be
-        reproduced a week later."""
-        sess = self._session_or_none()
-        if self.vars["real_use_session"].get() and sess:
-            p = os.path.join(sess, "gui_config_used.json")
-            if os.path.exists(p):
-                return p
-        return CONFIG_JSON
-
-    def _real_run_dir(self):
-        """Where the real run writes. Inside the session folder, in a
-        subfolder whose name says REAL, so sim and real runs of the same
-        design sit together and can never be mistaken for one another."""
-        sess = self._session_or_none()
-        if not (self.vars["real_use_session"].get() and sess):
-            return None                      # collect_real.py picks its own
-        return os.path.join(sess, "Real")
-
-    def _real_read_config(self):
-        """(cfg, problem). problem is a human sentence or None."""
-        path = self._real_config_path()
-        if not os.path.exists(path):
-            return None, ("No saved config yet. Design the object and the grid "
-                          "on the Collection tab and press Save Config.")
-        try:
-            with open(path) as f:
-                cfg = json.load(f)
-        except Exception as e:
-            return None, f"Could not read {path}: {e}"
-        if not cfg.get("points"):
-            return None, "That config has no grid points."
-        return cfg, None
-
-    def _real_refresh(self):
-        cfg, problem = self._real_read_config()
-        if problem:
-            self.real_cfg_lbl.configure(text=problem, foreground="#b00")
-            return
-        o = cfg.get("object", {}) or {}
-        shape = str(o.get("shape", "cylinder")).lower()
-        roll = float((cfg.get("pad") or {}).get("rotation_deg", 0.0))
-        w = float(o.get("diameter_mm", 0.0))
-        key = f"{w:.1f}" if shape == "cylinder" else f"{w:.1f}|{shape}"
-        if shape == "cylinder":
-            desc = f"cylinder \u00d8{w:.1f} x {o.get('length_mm', '?')} mm"
-        else:
-            desc = (f"{shape} {w:.1f} (grip) x {o.get('across_mm', '?')} "
-                    f"(across) x {o.get('length_mm', '?')} (along) mm")
-        sess = self._session_or_none()
-        cfg_path = self._real_config_path()
-        run_dir = self._real_run_dir()
-        txt = (f"{desc}\n"
-               f"grid          : {len(cfg['points'])} points, "
-               f"step {cfg.get('grid', {}).get('step_mm', '?')} mm\n"
-               f"pad roll      : {roll:g} deg\n"
-               f"calibration   : key '{key}'\n"
-               f"config read   : {cfg_path}\n"
-               f"writes to     : "
-               + (run_dir + os.sep + "run_<stamp>_real_..." if run_dir
-                  else "Data/gui_run/Real/  (no session set)"))
-        bad = (roll != 0) or (self.vars["real_use_session"].get() and not sess)
-        self.real_cfg_lbl.configure(text=txt,
-                                    foreground="#b00" if bad else "#000")
-
-    def _real_command(self, go):
-        """Build the command, or refuse and say why."""
-        cfg, problem = self._real_read_config()
-        if problem:
-            self.real_msg.configure(text=problem, foreground="#b00")
-            return
-        roll = float((cfg.get("pad") or {}).get("rotation_deg", 0.0))
-        if abs(roll) > 1e-6:
-            # collect_real.py refuses this too, but refusing HERE means the
-            # arm is never brought up for a run that cannot happen.
-            self.real_msg.configure(
-                text=(f"REFUSED: this config has pad rotation_deg={roll:g}. "
-                      f"Wrist roll is not verified on the real rig -- it needs "
-                      f"the pivot correction for the 156 mm flange-to-pad "
-                      f"lever, and getting it silently wrong would rotate "
-                      f"every footprint the stitcher paints. Design an upright "
-                      f"grid, or verify roll separately first."),
-                foreground="#b00")
-            return
-        v = self.vars
-        if v["real_use_session"].get() and not self._session_or_none():
-            self.real_msg.configure(
-                text=("REFUSED: 'write into my session folder' is ticked but no "
-                      "session is set. Press New session on the Collection tab, "
-                      "or untick it to let collect_real.py choose."),
-                foreground="#b00")
-            return
-        parts = ["cd /home/kourosh/Paper3_Simulation/Real_Robot &&",
-                 "python3 collect_real.py",
-                 f'--config "{self._real_config_path()}"']
-        _rd = self._real_run_dir()
-        if _rd:
-            # a per-run subfolder, stamped, so repeated runs of one design do
-            # not overwrite each other
-            parts.append(f'--run-dir "{os.path.join(_rd, "REAL_" + time.strftime("%Y%m%d_%H%M%S"))}"')
-        if v["real_allow_sim_cal"].get():
-            parts.append("--allow-sim-cal")
-        if v["real_object_here"].get():
-            parts.append("--object-here")
-        if v["real_home_here"].get():
-            parts.append("--home-here")
-        if v["real_home_vertical"].get():
-            parts.append("--home-vertical")
-        if v["real_home_above"].get():
-            parts.append("--home-above-object")
-        for flag, key in (("--max-tilt-deg", "real_max_tilt"),
-                          ("--speed-mm-s", "real_speed"),
-                          ("--arrival-tol-mm", "real_arrival")):
-            raw = str(v[key].get()).strip()
-            if raw:
-                try:
-                    parts.append(f"{flag} {float(raw):g}")
-                except ValueError:
-                    self.real_msg.configure(
-                        text=f"'{raw}' is not a number for {flag}.",
-                        foreground="#b00")
-                    return
-        if go:
-            parts.append("--go")
-        cmd = " ".join(parts)
-        self._real_show(cmd, go)
-
-    def _real_show(self, cmd, go):
-        win = tk.Toplevel(self.root)
-        win.title("RUN on the real robot" if go else "Dry run — nothing moves")
-        f = ttk.Frame(win, padding=12)
-        f.grid(row=0, column=0, sticky="nsew")
-        if go:
-            ttk.Label(f, foreground="#b00", font=("", 10, "bold"),
-                      wraplength=680, justify="left",
-                      text=("THIS MOVES THE ARM. Run the pre-flight checklist "
-                            "first, keep the pendant in your hand, and watch "
-                            "the 'type GO to confirm' prompt -- it is the last "
-                            "point at which this costs nothing.")
-                      ).grid(row=0, column=0, sticky="w", pady=(0, 8))
-        else:
-            ttk.Label(f, foreground="#555", wraplength=680, justify="left",
-                      text=("Nothing is sent. This checks the calibration key, "
-                            "the frame and IK at every point, and prints what "
-                            "it would do.")
-                      ).grid(row=0, column=0, sticky="w", pady=(0, 8))
-        t = tk.Text(f, width=96, height=6, wrap="word")
-        t.grid(row=1, column=0, sticky="nsew")
-        t.insert("1.0", cmd)
-        t.configure(state="disabled")
-
-        def _copy():
-            self.root.clipboard_clear()
-            self.root.clipboard_append(cmd)
-        ttk.Button(f, text="Copy", command=_copy).grid(row=2, column=0,
-                                                       sticky="w", pady=(8, 0))
-
-    def _real_preflight(self):
-        """The cell start-up, in order, each line copyable.
-
-        Worth its own dialog rather than a note in a manual: on 2026-09-05 the
-        pendant program stopped part way through a run, the driver went on
-        accepting trajectories, and the arm silently stayed at pt00 for eight
-        points. Nothing in the software could see it. A list you tick is what
-        turns that from a mystery into a step you skipped."""
-        win = tk.Toplevel(self.root)
-        win.title("Pre-flight — bring the cell up in this order")
-        outer = ttk.Frame(win, padding=12)
-        outer.grid(row=0, column=0, sticky="nsew")
-        ttk.Label(outer, font=("", 10, "bold"),
-                  text="Bring the cell up in this order"
-                  ).grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(outer, foreground="#555", wraplength=760, justify="left",
-                  text=("Every one of these has silently broken a run at least "
-                        "once. The pendant program is the one with no software "
-                        "symptom: goals are accepted and never reach the arm.")
-                  ).grid(row=1, column=0, columnspan=3, sticky="w",
-                         pady=(2, 10))
-        r = 2
-        for who, why, cmd in self.REAL_PREFLIGHT:
-            ttk.Checkbutton(outer).grid(row=r, column=0, sticky="nw")
-            lab = ttk.Frame(outer)
-            lab.grid(row=r, column=1, sticky="w", pady=(0, 6))
-            ttk.Label(lab, text=who, font=("", 9, "bold")
-                      ).grid(row=0, column=0, sticky="w")
-            ttk.Label(lab, text=why, wraplength=560, justify="left",
-                      foreground="#333").grid(row=1, column=0, sticky="w")
-            if cmd:
-                box = tk.Text(lab, width=78, height=2, wrap="word")
-                box.grid(row=2, column=0, sticky="w", pady=(2, 0))
-                box.insert("1.0", cmd)
-                box.configure(state="disabled")
-
-                def _mk(c):
-                    def _c():
-                        self.root.clipboard_clear()
-                        self.root.clipboard_append(c)
-                    return _c
-                ttk.Button(outer, text="Copy", command=_mk(cmd)
-                           ).grid(row=r, column=2, sticky="nw", padx=(8, 0))
-            r += 1
-
     def _build_stitch_tab(self):
         # SCROLLABLE (2026-08-22). The tab grew past the window: the blob-axis
         # block and the status line sat below the bottom edge with no way to
@@ -5156,8 +4698,22 @@ class CockpitGUI:
         self._stitch_dir = None
         self.stitch_run_lbl.config(text="(newest run — auto)")
 
+    # def _load_stitching_module(self):
+    #     import importlib.util
+    #     for cand in (os.path.join(PROJECT, "viz", "stitching.py"),
+    #                  os.path.join(PROJECT, "stitching.py"),
+    #                  os.path.join(PROJECT, "sim", "stitching.py")):
+    #         if os.path.exists(cand):
+    #             spec = importlib.util.spec_from_file_location("stitching", cand)
+    #             mod = importlib.util.module_from_spec(spec)
+    #             spec.loader.exec_module(mod)
+    #             return mod
+    #     return None
+
+
+
     def _load_stitching_module(self):
-        import importlib.util
+        import importlib.util, sys
         for cand in (os.path.join(PROJECT, "viz", "stitching.py"),
                      os.path.join(PROJECT, "stitching.py"),
                      os.path.join(PROJECT, "sim", "stitching.py")):
@@ -5165,8 +4721,12 @@ class CockpitGUI:
                 spec = importlib.util.spec_from_file_location("stitching", cand)
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
+                sys.modules["stitching"] = mod
                 return mod
         return None
+
+
+
 
     def do_design_grid(self):
         """Fill nx / ny / step / pad z from the object's geometry.
@@ -5206,14 +4766,6 @@ class CockpitGUI:
                 band_width_mm=self._picked_band_width(),
                 end_overhang=bool(self.vars["end_overhang"].get()))
             text = "\n".join(why)
-            # KEEP IT. A messagebox does not scroll, and on a rolled Oe72 the
-            # interesting part -- what the per-point gripper check trimmed and
-            # why -- is off the bottom of the screen. It is also the only
-            # record of WHY a grid has the counts it has, which is exactly the
-            # thing a run folder needs to be self-contained. Save Config
-            # writes it beside the config; _design_report_text() is also what
-            # the Save button on this tab writes on its own.
-            self._last_design_report = self._design_report_text(text, ok)
             if not ok:
                 self.design_lbl.config(text="design REFUSED — see dialog",
                                        foreground="#b00")
@@ -5243,61 +4795,13 @@ class CockpitGUI:
             # edge in it — nothing for a completion model to learn where the
             # object ends. Type a pad_dy near the edge and the sweep straddles
             # it.
-            #
-            # BUT A CYLINDER HAS NO SIDE EDGE (2026-09-08). The contact strip
-            # sits at the rod axis wherever the pad goes, so the ONLY correct
-            # anchor is 0 and anything else slides the whole sweep off the
-            # strip. Measured that day: six rolled cylinder designs were built
-            # with y left at +28.42 from an earlier experiment, and 3 to 45
-            # points per design could not touch the rod. Every report said
-            # ACCEPTED, because the four scalar limits describe the sweep's
-            # HALF-SPAN and nothing checked where its centre was.
-            #
-            # z has always been derived (the midpoint of the along window);
-            # y was the one anchor left typed, and that asymmetry is what let
-            # a stale number through. So design_grid now owns both.
-            _shape_now = str(self._picked_shape()).strip().lower()
-            _flat_now = _shape_now in ("cuboid", "cube")
-            if self.vars["auto_edge_y"].get() and _flat_now:
+            if self.vars["auto_edge_y"].get():
                 # derived, not typed: the far column lands exactly on the
                 # across limit, so the sweep straddles the side edge with the
                 # standard margin instead of over- or under-shooting it
                 self.vars["pad_dy"].set(f"{res['pad_dy_edge_mm']:.2f}")
-            elif not _flat_now:
-                _y_was = str(self.vars["pad_dy"].get()).strip()
-                self.vars["pad_dy"].set("0.0")
-                if _y_was not in ("", "0", "0.0", "+0.0", "-0.0", "0.00"):
-                    messagebox.showinfo(
-                        "Design grid — across anchor",
-                        f"y was {_y_was} mm; a {_shape_now} has no side edge, "
-                        f"so the sweep must be centred on its axis.\n\n"
-                        f"y has been set to 0.0. Anything else slides the "
-                        f"whole sweep off the contact strip, and the four "
-                        f"limits in the report describe the sweep's HALF-SPAN, "
-                        f"not where its centre is — so an off-axis design "
-                        f"still reports ACCEPTED while most of its points "
-                        f"never touch the object.")
             elif not str(self.vars["pad_dy"].get()).strip():
                 self.vars["pad_dy"].set("0.0")
-
-            # LAST GATE, for the flat case where a typed y is still allowed.
-            # "No ACROSS-side limit on a hand-typed y" has been on the
-            # known-broken list since v12.0 §9.2. This is it.
-            try:
-                _y_now = float(self.vars["pad_dy"].get())
-            except ValueError:
-                _y_now = 0.0
-            _y_reach = abs(_y_now) + res["n_across"] * res["step_mm"]
-            _y_cap = float(res.get("across_max_mm", _y_reach))
-            if _y_reach > _y_cap + 1e-6:
-                self.vars["pad_dy"].set(f"{res['pad_dy_edge_mm']:.2f}")
-                messagebox.showwarning(
-                    "Design grid — across anchor out of range",
-                    f"y {_y_now:+.2f} mm puts the outermost column "
-                    f"{_y_reach:.2f} mm from the object's across axis, past "
-                    f"the {_y_cap:.2f} mm the pad can reach and still touch.\n\n"
-                    f"y has been set to {res['pad_dy_edge_mm']:.2f} mm, which "
-                    f"lands the far column exactly on that limit.")
             self.vars["grid_centered"].set(True)
             # The point check tested the grid AS THE PAD STEPS IT. Leaving
             # this off would run a different grid from the one verified.
@@ -5314,103 +4818,10 @@ class CockpitGUI:
                       f"bound by {res['bound_by']}; gripper gap "
                       f"{res['gap_mm']:+.1f} mm"),
                 foreground="#0a6")
-            self._show_design_report(self._last_design_report)
+            messagebox.showinfo("Design grid", text)
         except Exception:
             messagebox.showerror("Design grid",
                 "Failed:\n\n" + traceback.format_exc())
-
-    def _design_report_text(self, why_text, ok):
-        """The reasons, with the inputs that produced them stamped on top.
-
-        A reason list is only evidence if you can tell which design it
-        describes. Every number the designer was given goes in the header, so
-        the file stands alone months later."""
-        try:
-            c = self._read() or {}
-        except Exception:
-            c = {}
-        # None for a cylinder: the band comes from the diameter, not a typed
-        # across width, and only the cuboid/sphere path supplies one.
-        _bw = self._picked_band_width()
-        _across_txt = (f"{CYL_D:.1f} (= diameter)" if _bw is None
-                       else f"{float(_bw):.1f}")
-        return "\n".join([
-            "DESIGN GRID REPORT",
-            f"written   : {time.strftime('%Y-%m-%d %H:%M:%S')}",
-            f"verdict   : {'ACCEPTED' if ok else 'REFUSED — nothing changed'}",
-            "",
-            "INPUTS",
-            f"  shape        : {self._picked_shape()}",
-            f"  grip W       : {CYL_D:.1f} mm",
-            f"  across       : {_across_txt} mm",
-            f"  along L      : {CYL_L:.1f} mm",
-            f"  object centre: "
-            f"{np.round(c.get('obj', np.zeros(3)), 2).tolist()} mm (world)",
-            f"  object tilt  : {c.get('tilt_deg', 0.0)} deg about "
-            f"{c.get('tilt_axis', 'X')}",
-            f"  pad roll     : {c.get('pad_rot', 0.0):+.1f} deg",
-            f"  pad offset   : y {c.get('pad_dy', 0.0):+.2f}  "
-            f"z {c.get('pad_dz', 0.0):+.2f} mm",
-            f"  step         : {c.get('step', 6.0):.1f} mm",
-            f"  end overhang : {bool(self.vars['end_overhang'].get())}",
-            f"  auto y anchor: {bool(self.vars['auto_edge_y'].get())}",
-            f"  coarse int.  : {bool(self.vars['coarse_interior'].get())}",
-            f"  calibration  : {self.vars['calib_source'].get()}",
-            "",
-            "WHY THESE COUNTS",
-            why_text,
-            "",
-            "Read the ACROSS and ALONG reach lines first: they say how far the",
-            "sweep actually goes against the limit that binds it. A POINT CHECK",
-            "trim means the four scalar limits above were satisfied but the",
-            "measured gripper body was not, at the grid's own rolled poses.",
-        ])
-
-    def _show_design_report(self, txt):
-        """Scrollable, copyable, savable — a messagebox is none of those."""
-        win = tk.Toplevel(self.root)
-        win.title("Design grid")
-        f = ttk.Frame(win, padding=10)
-        f.grid(row=0, column=0, sticky="nsew")
-        win.rowconfigure(0, weight=1); win.columnconfigure(0, weight=1)
-        f.rowconfigure(0, weight=1); f.columnconfigure(0, weight=1)
-        t = tk.Text(f, width=96, height=34, wrap="word")
-        sb = ttk.Scrollbar(f, orient="vertical", command=t.yview)
-        t.configure(yscrollcommand=sb.set)
-        t.grid(row=0, column=0, sticky="nsew"); sb.grid(row=0, column=1,
-                                                        sticky="ns")
-        t.insert("1.0", txt)
-        t.configure(state="disabled")
-        bf = ttk.Frame(f); bf.grid(row=1, column=0, sticky="w", pady=(8, 0))
-
-        def _copy():
-            self.root.clipboard_clear(); self.root.clipboard_append(txt)
-        ttk.Button(bf, text="Copy", command=_copy).grid(row=0, column=0)
-        ttk.Button(bf, text="Save to session folder",
-                   command=self._save_design_report).grid(row=0, column=1,
-                                                          padx=(8, 0))
-
-    def _save_design_report(self):
-        txt = getattr(self, "_last_design_report", None)
-        if not txt:
-            messagebox.showinfo("Design report",
-                                "Press Design grid first.")
-            return
-        sess = self._session_or_none()
-        if not sess:
-            messagebox.showinfo("Design report",
-                                "No session folder set. Press New session on "
-                                "this tab first.")
-            return
-        try:
-            os.makedirs(sess, exist_ok=True)
-            p = os.path.join(sess, "design_grid_report.txt")
-            with open(p, "w") as fh:
-                fh.write(txt + "\n")
-            self.status.config(text="design report written:\n" + p,
-                               foreground="#0a6")
-        except Exception as e:
-            messagebox.showerror("Design report", f"Could not write: {e}")
 
     def _load_grid_accuracy_module(self):
         """Load grid_accuracy.py. Like validation.py it imports stitching

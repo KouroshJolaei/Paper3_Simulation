@@ -3139,61 +3139,6 @@ def grasp_one_point(grasp_world, tag, row_marks, pose_hist, dy_m=0.0, dz_m=0.0,
             _progress(f"{tag} pad-to-pad EXEC start ({len(traj_pp)} wpts)")
             run_traj(traj_pp)
             _progress(f"{tag} pad-to-pad EXEC done")
-
-            # ---- ARRIVAL CHECK ON THE PAD-TO-PAD PATH (2026-09-04) ----
-            # The descent path has measured reached-vs-commanded since
-            # 2026-08-07 and refuses to close past MAX_DESCENT_RESIDUAL_MM.
-            # This path had NO such check: it ran the trajectory, set
-            # approached=True, and jumped straight to closing. Every point
-            # after the first travels this way, so the guard covered 1 point
-            # in 64.
-            #
-            # Measured cost: run_20260903_141200 pt32 (visit 33 of 64) landed
-            # 4.20 mm high in Z and 0.59 mm short in Y -- 77% of a taxel --
-            # closed normally (close_rad_stopped 0.49105, deformation
-            # 1.21 mm) and was recorded as exec_stage "complete",
-            # predicted_ok_executed_ok, 0 of 64 flagged. Grid accuracy caught
-            # it only because it compares poses afterwards; nothing refused
-            # at the time, which is the whole point of having a guard.
-            q_now = robot.get_joint_positions()[ai].copy()
-            cpos_t, _ = fk(q_now.astype(np.float32))
-            cur_world = rotmat(ROBOT_WORLD_QUAT_WXYZ) @ cpos_t + ROBOT_WORLD_POS
-            resid = np.asarray(grasp_world, float) - np.asarray(cur_world, float)
-            resid_mm = 1000.0 * float(np.linalg.norm(resid))
-
-            # Trim first, exactly as the descent path does: a short stitched
-            # line lands pad-to-pad at +-0.03 mm, so most of a residual this
-            # size is recoverable rather than fatal.
-            if resid_mm > 0.2:
-                _progress(f"{tag} pad-to-pad TRIM start "
-                          f"(residual {resid_mm:.2f} mm)")
-                traj_fix = plan_stitched_line(q_now, resid, f"{tag}:pp-trim",
-                                              n_steps=3)
-                if traj_fix is not None:
-                    run_traj(traj_fix)
-                    _progress(f"{tag} pad-to-pad TRIM done")
-                    q_now = robot.get_joint_positions()[ai].copy()
-                    cpos_t, _ = fk(q_now.astype(np.float32))
-                    cur_world = (rotmat(ROBOT_WORLD_QUAT_WXYZ) @ cpos_t
-                                 + ROBOT_WORLD_POS)
-                    resid_mm = 1000.0 * float(np.linalg.norm(
-                        np.asarray(grasp_world, float)
-                        - np.asarray(cur_world, float)))
-                else:
-                    _progress(f"{tag} pad-to-pad TRIM plan failed "
-                              f"(residual {resid_mm:.2f} mm)")
-
-            if resid_mm > MAX_DESCENT_RESIDUAL_MM:
-                print(f"[{tag}] pad-to-pad ARRIVED {resid_mm:.1f} mm from the "
-                      f"grasp pose (limit {MAX_DESCENT_RESIDUAL_MM:.1f} mm) — "
-                      f"NOT closing. The map would be labelled with a pose "
-                      f"the pad never reached.")
-                _progress(f"{tag} pad-to-pad residual {resid_mm:.1f} mm "
-                          f"-> ABORT")
-                _ledger(_tag_index(tag), "pad_to_pad_residual", False)
-                return False
-            print(f"[{tag}] pad-to-pad arrival residual {resid_mm:.2f} mm "
-                  f"(limit {MAX_DESCENT_RESIDUAL_MM:.1f} mm) — OK")
             approached = True
         else:
             _progress(f"{tag} pad-to-pad FAILED -> falling back to lift+descend")

@@ -61,13 +61,6 @@ HOLD_FRAC = 0.9                    # hold-average window, as a fraction of
                                    # tactile_DataReadSave3.run_average), so
                                    # 0.9 (91.8-100% of peak) matches that
                                    # convention. Costs 6 of 216 frames.
-HOLD_PCTL = 95.0                   # percentile of the per-frame sum used as
-                                   # the TOP of the range HOLD_FRAC is taken
-                                   # against. Added 2026-09-04 — see
-                                   # hold_average() for the measurement that
-                                   # forced it. Must stay high enough to sit
-                                   # inside the plateau and low enough that a
-                                   # 1-3 frame transient cannot reach it.
 OUTLIER_MM = 8.0                   # drop a grasp if recorded pose is >8mm
                                    # off its commanded pose (bad pose record)
 MIRROR_S2_IN_OVERLAY = False        # column 3: show s2 mirrored L-R, since
@@ -341,29 +334,7 @@ def hold_average(csv_path):
     (taxel sum <= 5% of that grasp's peak) define a per-taxel baseline —
     the fixed sensor pattern visible even with the gripper open. It is
     locked to the pad, so without subtraction stitching smears a copy of
-    it across the whole grid and buries the real contact structure.
-
-    THE TOP OF THE RANGE IS A PERCENTILE, NOT THE MAXIMUM (2026-09-04).
-    It used to be s.max(), which a SINGLE release transient can set. Measured
-    on run_20260903_173806 pt43: s2 held a clean plateau at 1647 for 213
-    frames, then one frame at release hit 2102. With max as the top, the 0.9
-    threshold landed at 1916.6 — ABOVE THE WHOLE PLATEAU — so the "hold
-    average" was that one release frame, and that single snapshot went into
-    the stitch and the training pair with nothing saying so. s1 on the same
-    grasp spiked only 7% above its plateau, stayed under the bar and kept 210
-    frames. That is the entire difference between 210 and 1: not contact
-    quality, the rule. The failure triggers whenever the release transient
-    exceeds the plateau by more than about 11%.
-
-    A high percentile cannot be set by a 1-3 frame transient, so the plateau
-    defines its own window. Measured on the same two traces:
-        s1  210 -> 211 frames      s2  1 -> 213 frames
-    Healthy grasps move by a frame; broken ones are fully recovered, which is
-    the property that makes this safe to apply to already-collected runs.
-
-    The transient frames still fall inside the window and are averaged in, at
-    a weight of ~1/213. Left deliberately: excluding them would need a second
-    threshold, and 0.5% is far below the row-gain spread."""
+    it across the whole grid and buries the real contact structure."""
     df = _read_tactile_csv(csv_path)
     pred = [c for c in df.columns if c.startswith("pred_")]
     v = df[pred].to_numpy()
@@ -371,10 +342,7 @@ def hold_average(csv_path):
     if not len(s):
         return np.zeros((N_ROWS, N_COLS)), 0, 0.0
     peak, smin = float(s.max()), float(s.min())
-    top = float(np.percentile(s, HOLD_PCTL))
-    rng = top - smin
-    if rng <= 0:                       # degenerate: fall back to the old span
-        rng = peak - smin
+    rng = peak - smin
     if rng <= 0:
         return np.zeros((N_ROWS, N_COLS)), 0, 0.0
     # thresholds referenced to the MINIMUM: a fixed sensor pattern raises the
@@ -416,7 +384,7 @@ def save_hold_averages(run_dir, verbose=True):
             rec = {"grasp": key, "sensor": sensor, "n_hold_frames": nfr,
                    "peak_sum": round(float(peak), 2),
                    "map_sum": round(float(m.sum()), 2),
-                   "hold_frac": HOLD_FRAC, "hold_pctl": HOLD_PCTL,
+                   "hold_frac": HOLD_FRAC,
                    "baseline_subtracted": bool(SUBTRACT_BASELINE)}
             rec.update({c: round(float(v), 4)
                         for c, v in zip(cols, m.reshape(-1))})
@@ -1289,8 +1257,6 @@ def stitch_run(run_dir, res_mm=1.0):
            f"SUBTRACT_BASELINE={SUBTRACT_BASELINE}  "
            f"MIRROR_S2_IN_OVERLAY={MIRROR_S2_IN_OVERLAY}  "
            f"OUTLIER_MM={OUTLIER_MM}",
-           f"hold win  : HOLD_FRAC={HOLD_FRAC} of (p{HOLD_PCTL:.0f} - min)  "
-           f"[p{HOLD_PCTL:.0f}, not max, since 2026-09-04]",
            f"DEAD_GRASPS_DROPPED={len(_load_dead_grasps(run_dir))}",
            f"pad/pitch : PAD_W={PAD_W} PAD_H={PAD_H} "
            f"PITCH_Y={PITCH_Y} PITCH_Z={PITCH_Z}",

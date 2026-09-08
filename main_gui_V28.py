@@ -1138,9 +1138,6 @@ def design_grid(diameter_mm, length_mm, tool_offset_z_mm, step_mm=6.0,
 
     return True, {"n_across": n_across, "n_along": n_along,
                   "pad_dy_edge_mm": round(pad_dy_edge, 2),
-                  # how far the pad CENTRE may sit from the object's across
-                  # axis and still touch. The caller gates a typed y on it.
-                  "across_max_mm": round(across_max, 2),
                   "step_mm": step, "pad_dz_mm": pad_dz,
                   "n_points": n_pts, "band_mm": 2 * band,
                   "swept_mm": (used_y, used_z), "bound_by": bound,
@@ -2477,12 +2474,6 @@ class CockpitGUI:
                 os.makedirs(_sess, exist_ok=True)
                 with open(os.path.join(_sess, "gui_config_used.json"), "w") as f:
                     json.dump(cfg, f, indent=2)
-                # the design reasons belong next to the design they explain
-                _rep = getattr(self, "_last_design_report", None)
-                if _rep:
-                    with open(os.path.join(_sess,
-                                           "design_grid_report.txt"), "w") as f:
-                        f.write(_rep + "\n")
                 try:
                     self.fig.savefig(os.path.join(_sess, "gui_preview.png"),
                                      dpi=110, bbox_inches="tight")
@@ -5206,14 +5197,6 @@ class CockpitGUI:
                 band_width_mm=self._picked_band_width(),
                 end_overhang=bool(self.vars["end_overhang"].get()))
             text = "\n".join(why)
-            # KEEP IT. A messagebox does not scroll, and on a rolled Oe72 the
-            # interesting part -- what the per-point gripper check trimmed and
-            # why -- is off the bottom of the screen. It is also the only
-            # record of WHY a grid has the counts it has, which is exactly the
-            # thing a run folder needs to be self-contained. Save Config
-            # writes it beside the config; _design_report_text() is also what
-            # the Save button on this tab writes on its own.
-            self._last_design_report = self._design_report_text(text, ok)
             if not ok:
                 self.design_lbl.config(text="design REFUSED — see dialog",
                                        foreground="#b00")
@@ -5243,61 +5226,13 @@ class CockpitGUI:
             # edge in it — nothing for a completion model to learn where the
             # object ends. Type a pad_dy near the edge and the sweep straddles
             # it.
-            #
-            # BUT A CYLINDER HAS NO SIDE EDGE (2026-09-08). The contact strip
-            # sits at the rod axis wherever the pad goes, so the ONLY correct
-            # anchor is 0 and anything else slides the whole sweep off the
-            # strip. Measured that day: six rolled cylinder designs were built
-            # with y left at +28.42 from an earlier experiment, and 3 to 45
-            # points per design could not touch the rod. Every report said
-            # ACCEPTED, because the four scalar limits describe the sweep's
-            # HALF-SPAN and nothing checked where its centre was.
-            #
-            # z has always been derived (the midpoint of the along window);
-            # y was the one anchor left typed, and that asymmetry is what let
-            # a stale number through. So design_grid now owns both.
-            _shape_now = str(self._picked_shape()).strip().lower()
-            _flat_now = _shape_now in ("cuboid", "cube")
-            if self.vars["auto_edge_y"].get() and _flat_now:
+            if self.vars["auto_edge_y"].get():
                 # derived, not typed: the far column lands exactly on the
                 # across limit, so the sweep straddles the side edge with the
                 # standard margin instead of over- or under-shooting it
                 self.vars["pad_dy"].set(f"{res['pad_dy_edge_mm']:.2f}")
-            elif not _flat_now:
-                _y_was = str(self.vars["pad_dy"].get()).strip()
-                self.vars["pad_dy"].set("0.0")
-                if _y_was not in ("", "0", "0.0", "+0.0", "-0.0", "0.00"):
-                    messagebox.showinfo(
-                        "Design grid — across anchor",
-                        f"y was {_y_was} mm; a {_shape_now} has no side edge, "
-                        f"so the sweep must be centred on its axis.\n\n"
-                        f"y has been set to 0.0. Anything else slides the "
-                        f"whole sweep off the contact strip, and the four "
-                        f"limits in the report describe the sweep's HALF-SPAN, "
-                        f"not where its centre is — so an off-axis design "
-                        f"still reports ACCEPTED while most of its points "
-                        f"never touch the object.")
             elif not str(self.vars["pad_dy"].get()).strip():
                 self.vars["pad_dy"].set("0.0")
-
-            # LAST GATE, for the flat case where a typed y is still allowed.
-            # "No ACROSS-side limit on a hand-typed y" has been on the
-            # known-broken list since v12.0 §9.2. This is it.
-            try:
-                _y_now = float(self.vars["pad_dy"].get())
-            except ValueError:
-                _y_now = 0.0
-            _y_reach = abs(_y_now) + res["n_across"] * res["step_mm"]
-            _y_cap = float(res.get("across_max_mm", _y_reach))
-            if _y_reach > _y_cap + 1e-6:
-                self.vars["pad_dy"].set(f"{res['pad_dy_edge_mm']:.2f}")
-                messagebox.showwarning(
-                    "Design grid — across anchor out of range",
-                    f"y {_y_now:+.2f} mm puts the outermost column "
-                    f"{_y_reach:.2f} mm from the object's across axis, past "
-                    f"the {_y_cap:.2f} mm the pad can reach and still touch.\n\n"
-                    f"y has been set to {res['pad_dy_edge_mm']:.2f} mm, which "
-                    f"lands the far column exactly on that limit.")
             self.vars["grid_centered"].set(True)
             # The point check tested the grid AS THE PAD STEPS IT. Leaving
             # this off would run a different grid from the one verified.
@@ -5314,103 +5249,10 @@ class CockpitGUI:
                       f"bound by {res['bound_by']}; gripper gap "
                       f"{res['gap_mm']:+.1f} mm"),
                 foreground="#0a6")
-            self._show_design_report(self._last_design_report)
+            messagebox.showinfo("Design grid", text)
         except Exception:
             messagebox.showerror("Design grid",
                 "Failed:\n\n" + traceback.format_exc())
-
-    def _design_report_text(self, why_text, ok):
-        """The reasons, with the inputs that produced them stamped on top.
-
-        A reason list is only evidence if you can tell which design it
-        describes. Every number the designer was given goes in the header, so
-        the file stands alone months later."""
-        try:
-            c = self._read() or {}
-        except Exception:
-            c = {}
-        # None for a cylinder: the band comes from the diameter, not a typed
-        # across width, and only the cuboid/sphere path supplies one.
-        _bw = self._picked_band_width()
-        _across_txt = (f"{CYL_D:.1f} (= diameter)" if _bw is None
-                       else f"{float(_bw):.1f}")
-        return "\n".join([
-            "DESIGN GRID REPORT",
-            f"written   : {time.strftime('%Y-%m-%d %H:%M:%S')}",
-            f"verdict   : {'ACCEPTED' if ok else 'REFUSED — nothing changed'}",
-            "",
-            "INPUTS",
-            f"  shape        : {self._picked_shape()}",
-            f"  grip W       : {CYL_D:.1f} mm",
-            f"  across       : {_across_txt} mm",
-            f"  along L      : {CYL_L:.1f} mm",
-            f"  object centre: "
-            f"{np.round(c.get('obj', np.zeros(3)), 2).tolist()} mm (world)",
-            f"  object tilt  : {c.get('tilt_deg', 0.0)} deg about "
-            f"{c.get('tilt_axis', 'X')}",
-            f"  pad roll     : {c.get('pad_rot', 0.0):+.1f} deg",
-            f"  pad offset   : y {c.get('pad_dy', 0.0):+.2f}  "
-            f"z {c.get('pad_dz', 0.0):+.2f} mm",
-            f"  step         : {c.get('step', 6.0):.1f} mm",
-            f"  end overhang : {bool(self.vars['end_overhang'].get())}",
-            f"  auto y anchor: {bool(self.vars['auto_edge_y'].get())}",
-            f"  coarse int.  : {bool(self.vars['coarse_interior'].get())}",
-            f"  calibration  : {self.vars['calib_source'].get()}",
-            "",
-            "WHY THESE COUNTS",
-            why_text,
-            "",
-            "Read the ACROSS and ALONG reach lines first: they say how far the",
-            "sweep actually goes against the limit that binds it. A POINT CHECK",
-            "trim means the four scalar limits above were satisfied but the",
-            "measured gripper body was not, at the grid's own rolled poses.",
-        ])
-
-    def _show_design_report(self, txt):
-        """Scrollable, copyable, savable — a messagebox is none of those."""
-        win = tk.Toplevel(self.root)
-        win.title("Design grid")
-        f = ttk.Frame(win, padding=10)
-        f.grid(row=0, column=0, sticky="nsew")
-        win.rowconfigure(0, weight=1); win.columnconfigure(0, weight=1)
-        f.rowconfigure(0, weight=1); f.columnconfigure(0, weight=1)
-        t = tk.Text(f, width=96, height=34, wrap="word")
-        sb = ttk.Scrollbar(f, orient="vertical", command=t.yview)
-        t.configure(yscrollcommand=sb.set)
-        t.grid(row=0, column=0, sticky="nsew"); sb.grid(row=0, column=1,
-                                                        sticky="ns")
-        t.insert("1.0", txt)
-        t.configure(state="disabled")
-        bf = ttk.Frame(f); bf.grid(row=1, column=0, sticky="w", pady=(8, 0))
-
-        def _copy():
-            self.root.clipboard_clear(); self.root.clipboard_append(txt)
-        ttk.Button(bf, text="Copy", command=_copy).grid(row=0, column=0)
-        ttk.Button(bf, text="Save to session folder",
-                   command=self._save_design_report).grid(row=0, column=1,
-                                                          padx=(8, 0))
-
-    def _save_design_report(self):
-        txt = getattr(self, "_last_design_report", None)
-        if not txt:
-            messagebox.showinfo("Design report",
-                                "Press Design grid first.")
-            return
-        sess = self._session_or_none()
-        if not sess:
-            messagebox.showinfo("Design report",
-                                "No session folder set. Press New session on "
-                                "this tab first.")
-            return
-        try:
-            os.makedirs(sess, exist_ok=True)
-            p = os.path.join(sess, "design_grid_report.txt")
-            with open(p, "w") as fh:
-                fh.write(txt + "\n")
-            self.status.config(text="design report written:\n" + p,
-                               foreground="#0a6")
-        except Exception as e:
-            messagebox.showerror("Design report", f"Could not write: {e}")
 
     def _load_grid_accuracy_module(self):
         """Load grid_accuracy.py. Like validation.py it imports stitching

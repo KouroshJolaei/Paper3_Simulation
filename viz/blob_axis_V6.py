@@ -260,19 +260,7 @@ def expected_patch_map(pad_yz, basis, scene, band_width_mm=BAND_WIDTH_MM,
     e = np.array([-np.sin(T), np.cos(T)])           # rod axis, world (Y, Z)
     n = np.array([np.cos(T), np.sin(T)])            # across the rod
     P0 = np.array([float(scene["cy"]), float(scene["cz"])])
-    # half_w = max(float(band_width_mm), 1e-6) / 2.0
-    # half_L = float(scene.get("L", 1e6)) / 2.0
-
-
-    # A FLAT face has no compliance limit and no curvature, so pressure is
-    # uniform wherever pad and face overlap and zero elsewhere. The Hertzian
-    # ridge below is a CYLINDER model: it peaks on the generatrix and falls
-    # off across the band. Applied to a 120 mm face it invented a brightness
-    # gradient across the pad and inflated the expected elongation (2.59 vs a
-    # measured 1.76 on a pose where the pad sat wholly on flat face).
-    _flat = str(scene.get("shape", "cylinder")).lower() in ("cuboid", "cube")
-    half_w = (float(scene.get("d", band_width_mm)) / 2.0 if _flat
-              else max(float(band_width_mm), 1e-6) / 2.0)
+    half_w = max(float(band_width_mm), 1e-6) / 2.0
     half_L = float(scene.get("L", 1e6)) / 2.0
 
     s = (np.arange(subsample) + 0.5) / subsample - 0.5      # -0.5 .. +0.5
@@ -287,20 +275,9 @@ def expected_patch_map(pad_yz, basis, scene, band_width_mm=BAND_WIDTH_MM,
     r = (Wy - P0[0]) * n[0] + (Wz - P0[1]) * n[1]   # distance across the rod
     sA = (Wy - P0[0]) * e[0] + (Wz - P0[1]) * e[1]  # distance along the rod
 
-    # q = 1.0 - (r / half_w) ** 2
-    # p = np.where((q > 0) & (np.abs(sA) <= half_L), np.sqrt(np.clip(q, 0, None)),
-    #              0.0)
-
-    on_body = (np.abs(r) <= half_w) & (np.abs(sA) <= half_L)
-    if _flat:
-        p = np.where(on_body, 1.0, 0.0)
-    else:
-        q = 1.0 - (r / half_w) ** 2
-        p = np.where((q > 0) & (np.abs(sA) <= half_L),
-                     np.sqrt(np.clip(q, 0, None)), 0.0)
-
-
-
+    q = 1.0 - (r / half_w) ** 2
+    p = np.where((q > 0) & (np.abs(sA) <= half_L), np.sqrt(np.clip(q, 0, None)),
+                 0.0)
     m = p.mean(axis=(2, 3))                          # integrate each taxel
     if m.max() > 0:
         m = m / m.max() * 1000.0                     # arbitrary units

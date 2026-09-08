@@ -3,17 +3,18 @@
     "center_world_mm": [
       -268.06,
       199.0,
-      1032.2
+      1052.2
     ],
     "tilt_deg": 0.0,
-    "tilt_axis": "X",
-    "shape": "cylinder",
-    "diameter_mm": 40.0,
-    "length_mm": 100.0
+    "tilt_axis": "Y",
+    "shape": "cuboid",
+    "diameter_mm": 30.0,
+    "across_mm": 8.0,
+    "length_mm": 140.0
   },
   "pad": {
     "base_offset_y_mm": 0.0,
-    "base_offset_z_mm": 20.0,
+    "base_offset_z_mm": 45.0,
     "x_fixed_centered": true
   },
   "grid": {
@@ -26,7 +27,7 @@
     {
       "index": 0,
       "pad_offset_y_mm": 0.0,
-      "pad_offset_z_mm": 20.0
+      "pad_offset_z_mm": 45.0
     }
   ],
   "calibrate": true

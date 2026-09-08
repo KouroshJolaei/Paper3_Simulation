@@ -1,0 +1,36 @@
+I'm Kourosh, PhD candidate at CoRo Lab, ÉTS Montréal, working on Paper 3: a
+learned tactile contact-completion model trained on Isaac Sim data, replacing
+the hand-crafted shape-classifier extrapolation of Papers 1 and 2.
+
+Read PAPER3_HANDOFF_v12_0.pdf FIRST and treat it as authoritative — especially
+§0, which describes a data run that is in flight right now, and §11, which is
+how I work. The older handoffs (v11_2, v10_0, v9_0) are history for context
+only; where they disagree with v12_0, v12_0 wins. Note the numbering on my disk
+drifted: PAPER3_HANDOFF_v11_2.pdf is internally titled "v13.0". Also attached:
+Paper 1, Paper 2, and Berith De la Cruz Sánchez's paper on the simulated TSF-85
+sensor whose CNN my pipeline depends on, plus my current code.
+
+Before trusting anything about the code, verify file freshness by grepping for
+the signatures in §2 of the handoff.
+
+Where I am: I am running two sweeps right now — a 30x120x140 cuboid at 64 points
+with the new "coarse interior" thinning ON, and a Ø26x140 cylinder at 45 points
+with it OFF. Everything else is identical between them, so shape is the only
+variable. When they finish I will share, for each: gui_config_used.json,
+execution_ledger.json, stitch_report.txt, stitched_s1.png, grid_accuracy.txt,
+grid_quality_s1.txt, run_manifest.txt, two heatmaps (pt00 and one edge point),
+and one training-pair .npz from an edge anchor. Run the five checks in §0 in
+order. If all five pass, the collection pipeline is cleared for both shapes and
+we move to Block 3 (U-Net training) — which per §8.2 is the priority, because
+Blocks 3 and 4 have stayed unstarted while the collection tooling kept
+improving.
+
+How I work: one verifiable step at a time; measure, never guess; distances in
+mm; complete files, never diffs; commands on one line; short answers, usually
+one line per question unless I ask for more. When my read of the Isaac Sim
+window contradicts a diagnostic, interrogate the diagnostic — that instinct has
+been right every time. Bad data must refuse loudly rather than degrade
+silently.
+
+Two questions to start: do you have the full picture, and is there anything
+else you need to see before we dive in? One line each.
